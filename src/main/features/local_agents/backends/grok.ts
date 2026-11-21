@@ -10,4 +10,5 @@ export const grokBackend = makeAcpBackend({
   logName: 'local-agents:grok',
   argv: ['agent', 'stdio'],
   clientName: 'orkas',
+  diagnoseUsageOnce: true,
 });

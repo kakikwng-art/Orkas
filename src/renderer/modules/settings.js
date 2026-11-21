@@ -1445,7 +1445,7 @@ async function _settingsClickAddEntry() {
 
 function _settingsChooseAccountMethod(provider, modelId) {
   if (provider.localCli) {
-    void _settingsAddLocalCliEntry(provider, modelId);
+    void _settingsPrepareLocalCliEntry(provider, modelId);
     return;
   }
   if (_settingsIsOpenRouterCustomModel(provider.id, modelId)) {
@@ -1501,6 +1501,29 @@ function _settingsChooseAccountMethod(provider, modelId) {
 
   if (hasOAuth && !hasApi) { _settingsStartOAuthFlow(provider, modelId); return; }
   _settingsShowApiKeyForm(provider, modelId);
+}
+
+async function _settingsPrepareLocalCliEntry(provider, modelId) {
+  _settingsSetStatus('settings-picker-status', 'busy', t('settings.save_loading'));
+  try {
+    const status = await window.orkas.invoke('auth.getLocalCliAuthStatus', { provider: provider.id });
+    if (!status || !status.ok) throw new Error((status && status.error) || t('settings.save_failed'));
+    if (status.state === 'authenticated') {
+      await _settingsAddLocalCliEntry(provider, modelId);
+      return;
+    }
+    if (status.state === 'unauthenticated') {
+      await _settingsStartOAuthFlow(provider, modelId, { addLocalEntry: true });
+      return;
+    }
+    _settingsSetStatus(
+      'settings-picker-status',
+      'error',
+      '暂时无法确认 Grok 登录状态，请点击已有 Grok 卡片上的“授权登录”重试。',
+    );
+  } catch (err) {
+    _settingsSetStatus('settings-picker-status', 'error', (err && err.message) || t('settings.save_failed'));
+  }
 }
 
 async function _settingsAddLocalCliEntry(provider, modelId) {
@@ -1891,7 +1914,7 @@ let _oauthFlowId        = null;
 let _oauthFlowTarget = null;
 let _oauthFlowOwner = null;
 
-async function _settingsStartOAuthFlow(provider, modelId) {
+async function _settingsStartOAuthFlow(provider, modelId, options = {}) {
   const overlay   = document.getElementById('oauth-flow-modal');
   const title     = document.getElementById('oauth-flow-title');
   const body      = document.getElementById('oauth-flow-body');
@@ -1906,7 +1929,13 @@ async function _settingsStartOAuthFlow(provider, modelId) {
   _settingsCloseAddModal();
   if (_oauthFlowOwner) _oauthFlowOwner.closeFlow();
   const owner = { closeFlow: null, settling: false };
-  _oauthFlowTarget = { provider, modelId, oauthProviderId };
+  _oauthFlowTarget = {
+    provider,
+    modelId,
+    oauthProviderId,
+    localCli: !!provider.localCli,
+    addLocalEntry: options.addLocalEntry !== false,
+  };
   title.textContent = t('settings.oauth.title_prefix', { provider: provider.label || provider.id });
   const aliasTip = aliased
     ? `<div class="oauth-flow-hint">${escapeHtml(t('settings.oauth.alias_tip', { provider: oauthProviderId }))}</div>`
@@ -2065,6 +2094,28 @@ function _oauthFlowRender(provider, status, closeFlow) {
     body.innerHTML = `<div class="oauth-flow-stage ok">${escapeHtml(t('settings.oauth.success_writing'))}</div>`;
     if (_oauthFlowPollTimer) { clearInterval(_oauthFlowPollTimer); _oauthFlowPollTimer = null; }
     (async () => {
+      if (status.localCli || target?.localCli) {
+        try {
+          if (target?.addLocalEntry) {
+            const addRes = await window.orkas.invoke('auth.addLocalCliEntry', {
+              provider: target.provider.id,
+              model: target.modelId,
+            });
+            if (!addRes || !addRes.ok) throw new Error((addRes && addRes.error) || t('settings.add_entry_failed'));
+          }
+          if (isCurrent()) closeFlow();
+          await _settingsReload();
+          if (typeof refreshModelGuard === 'function') {
+            await Promise.resolve(refreshModelGuard()).catch(() => {});
+          }
+        } catch (err) {
+          if (isCurrent()) {
+            owner.settling = false;
+            body.innerHTML = `<div class="oauth-flow-stage error">${escapeHtml((err && err.message) || t('settings.add_entry_failed'))}</div>`;
+          }
+        }
+        return;
+      }
       const removeNewCredential = async () => {
         if (!profileId) return;
         await window.orkas.invoke('auth.removeCredential', { profileId }).catch(() => {});
@@ -2289,13 +2340,24 @@ function _settingsRenderEntryRow(entry, priorityIdx) {
 
   const meta = document.createElement('div');
   meta.className = 'entry-meta';
-  const badge = document.createElement('span');
+  const badge = document.createElement(entry.profileType === 'local_cli' ? 'button' : 'span');
   if (isOrkasApi) {
     badge.className = 'account-type-badge';
     badge.textContent = 'Orkas';
   } else if (entry.profileType === 'oauth' || entry.profileType === 'local_cli') {
     badge.className = 'account-type-badge oauth' + (entry.oauthExpired ? ' expired' : '');
     badge.textContent = entry.oauthExpired ? t('settings.entries.oauth_expired') : t('settings.entries.oauth_badge');
+    if (entry.profileType === 'local_cli') {
+      badge.type = 'button';
+      badge.title = t('settings.entries.oauth_badge');
+      badge.setAttribute('draggable', 'false');
+      badge.addEventListener('mousedown', (event) => event.stopPropagation());
+      badge.addEventListener('pointerdown', (event) => event.stopPropagation());
+      badge.addEventListener('click', (event) => {
+        event.stopPropagation?.();
+        _settingsStartLocalCliAuthorization(entry);
+      });
+    }
   } else {
     badge.className = 'account-type-badge';
     badge.textContent = 'API Key';
@@ -2338,6 +2400,21 @@ function _settingsRenderEntryRow(entry, priorityIdx) {
   testBtn.onclick = () => _settingsTestEntry(entry, status);
   actions.appendChild(testBtn);
 
+  if (entry.profileType === 'local_cli') {
+    const authorizeBtn = document.createElement('button');
+    authorizeBtn.type = 'button';
+    authorizeBtn.className = 'icon-btn local-cli-authorize-btn';
+    authorizeBtn.textContent = t('settings.entries.oauth_badge');
+    authorizeBtn.title = t('settings.entries.oauth_badge');
+    authorizeBtn.setAttribute('draggable', 'false');
+    authorizeBtn.addEventListener('mousedown', (event) => event.stopPropagation());
+    authorizeBtn.addEventListener('click', (event) => {
+      event.stopPropagation?.();
+      _settingsStartLocalCliAuthorization(entry);
+    });
+    actions.appendChild(authorizeBtn);
+  }
+
   const delBtn = document.createElement('button');
   delBtn.className = 'icon-btn danger';
   delBtn.textContent = t('common.delete');
@@ -2361,6 +2438,17 @@ function _settingsRenderEntryRow(entry, priorityIdx) {
   });
 
   return row;
+}
+
+function _settingsStartLocalCliAuthorization(entry) {
+  const catalogProvider = _settingsState.providers.find((item) => item.id === entry.provider);
+  const provider = {
+    ...(catalogProvider || {}),
+    id: entry.provider,
+    label: catalogProvider?.label || entry.providerLabel || entry.provider,
+    localCli: catalogProvider?.localCli || 'grok',
+  };
+  void _settingsStartOAuthFlow(provider, entry.model, { addLocalEntry: false });
 }
 
 // Shared row drag-and-drop reorder. `kind` discriminates between the three

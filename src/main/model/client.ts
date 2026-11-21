@@ -16,6 +16,7 @@
 
 import type { AgentRunSteerInput, AgentTool, HistoryResource, Message } from '#core-agent';
 import type { SkillRuntimeBinding, SkillSelectionInput } from './core-agent/skill-registry';
+import type { GrokCommanderBridgeFactory } from './core-agent/grok-build-provider';
 
 import {
   abortActiveSession as _abortActiveSession,
@@ -92,6 +93,16 @@ export interface ChatOptions {
   /** Working directory for tool execution (list_files, read_file, bash, etc.).
    * Defaults to process.cwd() if omitted. */
   workingDir?: string;
+  /** Working directory for provider adapters that own their execution loop
+   * (notably the official Grok Build CLI). This is the user-selected workspace
+   * root, not the per-conversation artefact subdir: CLI adapters spawn a real
+   * process whose cwd must already exist, while the artefact subdir is created
+   * lazily on first write. Falls back to `workingDir` when omitted. */
+  providerWorkingDir?: string;
+  /** Commander-only host bridge factory for the Grok Build ACP turn. Exposes
+   * the real OrkaS Agent dispatch (`commander.dispatch`) so delegation runs a
+   * worker in the host instead of being simulated in the model reply. */
+  commanderBridge?: GrokCommanderBridgeFactory;
   /** Image attachments forwarded to vision-capable providers. `data` is base64
    * (no `data:` prefix). Used by `features/contexts_extract` for vision-based
    * description of uploaded images in the knowledge base staging area. */

@@ -18,7 +18,7 @@
 import { createLogger } from '../../../logger.js';
 import { logErrorSummary } from '../../../util/log-redact.js';
 import { t } from '../../../i18n.js';
-import { AcpDiagnostics } from './acp-diagnostics.js';
+import { AcpDiagnostics, AcpUsageShapeDiagnostics } from './acp-diagnostics.js';
 import {
   type LocalBackend,
   type BackendRunOptions,
@@ -44,7 +44,22 @@ export interface AcpBackendDef {
   refreshMcpAfterModelSelection?: boolean;
   /** Extra env vars to merge with `process.env` when spawning. */
   extraEnv?: Record<string, string> | ((opts: BackendRunOptions) => Record<string, string>);
+  /** Capture one value-free usage_update shape on the next normal process run. */
+  diagnoseUsageOnce?: boolean;
 }
+
+let usageDiagnosticClaimed = false;
+
+/** Servers may finish their auth bootstrap before answering `initialize`.
+ * Grok reloads its cached token and silently refreshes it (~1s), so a
+ * `session/new` sent earlier is rejected with `-32000 Authentication
+ * required / no auth method id provided` and the whole turn dies before the
+ * prompt. Wait for the real acknowledgement; this is only a bounded fallback
+ * for servers that never answer `initialize`. */
+const INITIALIZE_ACK_GRACE_MS = 10_000;
+
+/** Test-only reset for the process-local one-shot claim. */
+export function resetAcpUsageDiagnosticForTest(): void { usageDiagnosticClaimed = false; }
 
 export function makeAcpBackend(def: AcpBackendDef): LocalBackend {
   const log = createLogger(def.logName);
@@ -57,6 +72,9 @@ export function makeAcpBackend(def: AcpBackendDef): LocalBackend {
       const tail = new StderrTail();
       const startedAt = Date.now();
       const diagnostics = new AcpDiagnostics();
+      const usageDiagnostics = def.diagnoseUsageOnce && !usageDiagnosticClaimed
+        ? (usageDiagnosticClaimed = true, new AcpUsageShapeDiagnostics())
+        : null;
       let processState: 'open' | 'exit' | 'close' = 'open';
       child.once('exit', () => { processState = 'exit'; });
 
@@ -67,6 +85,9 @@ export function makeAcpBackend(def: AcpBackendDef): LocalBackend {
       let resultStatus: 'completed' | 'failed' | undefined;
       let resultError: string | undefined;
       let compatibilityFailure = false;
+      // Provider-reported usage on the prompt terminal. Kept raw: normalization
+      // belongs to the caller, and an absent value must stay unknown (NULL).
+      let resultUsage: unknown;
       const toolNames = new Map<string, string>();
       // Captured upstream-provider error text from stderr. ACP servers
       // (notably hermes 0.9) treat upstream HTTP 400/auth errors as
@@ -287,6 +308,11 @@ export function makeAcpBackend(def: AcpBackendDef): LocalBackend {
               return bounded ? String(bounded.optionId || bounded.option_id || '') : '';
             };
             diagnostics.permissionStarted();
+            // Give the host approval dialog the concrete target when the
+            // agent exposes one. Paths are informational only; the host still
+            // owns the allow/deny decision.
+            const subject = [rawInput.path, rawInput.file_path, rawInput.filePath, rawInput.target, rawInput.cwd]
+              .find((value): value is string => typeof value === 'string' && !!value.trim());
             void (async () => {
               const fullAccess = opts.permissionPolicy === 'full_access';
               const decision = fullAccess
@@ -298,6 +324,7 @@ export function makeAcpBackend(def: AcpBackendDef): LocalBackend {
                     ? rawInput.description
                     : typeof toolCall.title === 'string' ? toolCall.title : undefined,
                   command: typeof rawInput.command === 'string' ? rawInput.command : undefined,
+                  ...(subject ? { subject } : {}),
                 }) ?? Promise.resolve('deny'));
               if (exited) return;
               const selected = decision === 'deny' ? '' : optionId();
@@ -387,6 +414,8 @@ export function makeAcpBackend(def: AcpBackendDef): LocalBackend {
               callId: media.callId,
               items: media.items,
             }),
+            onUsageUpdate: update => usageDiagnostics?.observe(update),
+            onUsage: usage => { resultUsage = usage; },
             onPromptResult: r => {
               resultStatus = r.ok ? 'completed' : 'failed';
               if (r.ok && r.text) resultText = r.text;
@@ -410,11 +439,17 @@ export function makeAcpBackend(def: AcpBackendDef): LocalBackend {
         });
       });
 
-      // Fire-and-forget timeout to be sure session start goes; some CLIs
-      // ack initialize without printing anything we'd recognize as the
-      // ack, and then sit idle. The one-shot guard prevents a late fallback
-      // from creating a second session after a normal initialize response.
-      const initTimer = setTimeout(sendSessionStart, 250);
+      // The session start waits for the `initialize` acknowledgement (see
+      // INITIALIZE_ACK_GRACE_MS). Some CLIs ack initialize without printing
+      // anything we'd recognize as the ack, so keep a bounded fallback; the
+      // one-shot guard prevents a late fallback from creating a second session
+      // after a normal initialize response.
+      const remainingMs = opts.deadlineAt === undefined ? undefined : opts.deadlineAt - Date.now();
+      const initGraceMs = Math.max(1, Math.min(
+        INITIALIZE_ACK_GRACE_MS,
+        remainingMs ?? opts.timeoutMs ?? INITIALIZE_ACK_GRACE_MS,
+      ));
+      const initTimer = setTimeout(sendSessionStart, initGraceMs);
       if (typeof initTimer.unref === 'function') initTimer.unref();
 
       const stderrLines = new LineSplitter(64 * 1024);
@@ -454,7 +489,10 @@ export function makeAcpBackend(def: AcpBackendDef): LocalBackend {
           detachAbort();
           // One content-free summary survives both local archives and sampled
           // conversations. It must not count as fresh CLI progress.
-          const summary = diagnostics.snapshot(status, endReason, processState, child.exitCode);
+          const summary = {
+            ...diagnostics.snapshot(status, endReason, processState, child.exitCode),
+            ...(usageDiagnostics ? { usageDiagnostic: usageDiagnostics.snapshot() } : {}),
+          };
           log.info('ACP run diagnostics', summary);
           opts.onEvent({
             type: 'log', level: 'info', source: 'acp-diagnostics', synthetic: true,
@@ -489,7 +527,12 @@ export function makeAcpBackend(def: AcpBackendDef): LocalBackend {
               error: `${def.logName.replace('local-agents:', '')} reported success but produced no text — upstream: ${stderrErrorHint}`,
               output: '', stderrTail: tail.toString(),
             });
-            finish('completed', { output: resultText });
+            finish('completed', {
+              output: resultText,
+              // Resume sessions may report cumulative usage; only a fresh
+              // session can attribute this terminal to the current run.
+              ...(resultUsage !== undefined && !requestedResumeId ? { usage: resultUsage } : {}),
+            });
           } finally {
             // The protocol response ends this one-shot dispatch. Cleanup owns
             // its own bounded lifetime; inherited pipes or a persistent server
@@ -529,6 +572,9 @@ interface AcpHandlers {
   onToolUse(tool: { name: string; callId: string; input: unknown }): void;
   onToolResult(tool: { name: string; callId: string; output: string }): void;
   onMediaOutput(media: { callId: string; items: Array<Record<string, string>> }): void;
+  onUsageUpdate(update: unknown): void;
+  /** Provider-reported usage on the prompt terminal (`result._meta`). */
+  onUsage?(usage: unknown): void;
   onPromptResult(r: { ok: boolean; text?: string; error?: string }): void;
   onUnknown(raw: any): void;
 }
@@ -555,6 +601,12 @@ export function handleAcpMessage(env: any, h: AcpHandlers): void {
       || (typeof upd.kind === 'string' && upd.kind)
       || '';
     if (!kind) return;
+    if (kind === 'usage_update') {
+      // Pass only the update body to the value-free diagnostic. Session ids and
+      // the surrounding JSON-RPC envelope never cross this boundary.
+      h.onUsageUpdate(upd);
+      return;
+    }
     if (kind === 'agent_message_chunk') {
       const text = upd.content?.text;
       if (typeof text === 'string' && text.length) h.onTextDelta(text);
@@ -619,6 +671,7 @@ export function handleAcpMessage(env: any, h: AcpHandlers): void {
     if (idNum === 100) {
       // Prompt completed. result.stopReason tells us why.
       const ok = !env.result?.stopReason || env.result.stopReason === 'end_turn';
+      h.onUsage?.(env.result?._meta?.totalUsage ?? env.result?._meta?.usage);
       h.onPromptResult({ ok, error: ok ? undefined : String(env.result?.stopReason || 'unknown') });
       return;
     }

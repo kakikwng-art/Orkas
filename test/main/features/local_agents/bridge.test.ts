@@ -147,6 +147,8 @@ async function startTestBridge(opts: {
   permissionPolicy?: 'inherit' | 'ask' | 'full_access';
   cli?: 'claude' | 'codex' | 'openclaw' | 'opencode' | 'hermes';
   onCallObserved?: (observation: any) => void;
+  dispatchCommanderTask?: (request: any) => Promise<any>;
+  allowedCapabilities?: readonly string[];
 } = {}) {
   const { startBridge } = await import('../../../../src/main/features/local_agents/bridge');
   return startBridge({
@@ -164,6 +166,8 @@ async function startTestBridge(opts: {
     workingDir: opts.workingDir,
     onOutputsPublished: opts.onOutputsPublished,
     signal: opts.signal,
+    ...(opts.dispatchCommanderTask ? { dispatchCommanderTask: opts.dispatchCommanderTask } : {}),
+    ...(opts.allowedCapabilities ? { allowedCapabilities: opts.allowedCapabilities as any } : {}),
     runId: opts.runId || `t${Date.now().toString(36)}${Math.floor(Math.random() * 1e6).toString(36)}`,
     configDir: path.join(tmpDir, 'rundir'),
     sandboxEnv: {
@@ -1864,6 +1868,63 @@ describe('uniform CLI bridge permissions', () => {
         params: { action: 'add', content: 'Forbidden', agentId: 'another-agent' } });
       expect((rejected.reply as any).ok).toBe(false);
       expect(memory.listAgentEntries(TEST_UID, 'another-agent').entries).toEqual([]);
+    } finally { await bridge.close(); }
+  });
+});
+
+describe('Commander ACP dispatch', () => {
+  it('scopes the bridge to commander.dispatch and returns the settled worker result', async () => {
+    const calls: Array<Record<string, unknown>> = [];
+    const bridge = await startTestBridge({
+      allowedCapabilities: ['commander.dispatch'],
+      dispatchCommanderTask: async (request) => {
+        calls.push(request as Record<string, unknown>);
+        return { ok: true, payload: 'worker result: delivered', taskId: 'task-1' };
+      },
+    });
+    try {
+      // A Commander ACP session gets orchestration only — no skills, connectors,
+      // tasks, memory, outputs or browser leak into the official CLI.
+      expect([...bridge.capabilities]).toEqual(['commander.dispatch']);
+      const reply = await rpcOnce(bridge.socketPath, {
+        id: 1, token: bridge.token, method: 'commander.dispatch',
+        params: { to: 'Agent Two', message: 'Do the work', resume: '' },
+      });
+      expect(reply.reply).toMatchObject({
+        ok: true, result: { ok: true, task_id: 'task-1', result: 'worker result: delivered' },
+      });
+      expect(calls).toEqual([{ to: 'Agent Two', message: 'Do the work' }]);
+    } finally { await bridge.close(); }
+  });
+
+  it('rejects an incomplete dispatch before the host runs any worker', async () => {
+    const dispatchCommanderTask = vi.fn(async () => ({ ok: true, payload: 'unused' }));
+    const bridge = await startTestBridge({ dispatchCommanderTask });
+    try {
+      const missingTarget = await rpcOnce(bridge.socketPath, {
+        id: 1, token: bridge.token, method: 'commander.dispatch',
+        params: { message: 'Do the work' },
+      });
+      expect((missingTarget.reply as any).ok).toBe(false);
+      const missingMessage = await rpcOnce(bridge.socketPath, {
+        id: 2, token: bridge.token, method: 'commander.dispatch',
+        params: { to: 'Agent Two' },
+      });
+      expect((missingMessage.reply as any).ok).toBe(false);
+      expect(dispatchCommanderTask).not.toHaveBeenCalled();
+      expect(bridge.capabilities).toContain('commander.dispatch');
+    } finally { await bridge.close(); }
+  });
+
+  it('does not expose commander.dispatch without a host dispatch callback', async () => {
+    const bridge = await startTestBridge();
+    try {
+      expect(bridge.capabilities).not.toContain('commander.dispatch');
+      const reply = await rpcOnce(bridge.socketPath, {
+        id: 1, token: bridge.token, method: 'commander.dispatch',
+        params: { to: 'Agent Two', message: 'Do the work' },
+      });
+      expect(reply.reply).toMatchObject({ ok: false, error: 'unknown method: commander.dispatch' });
     } finally { await bridge.close(); }
   });
 });

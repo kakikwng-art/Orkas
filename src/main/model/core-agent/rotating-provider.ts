@@ -162,6 +162,10 @@ export interface RotatingCandidate {
   maxInputImages?: number;
   /** Only custom models carry an explicit API capability observation. */
   imageSupport?: CustomModelImageSupport;
+  /** Candidate-local, request-only projection. Used by text-only adapters to
+   * narrow their input without changing the shared session view or fallback
+   * candidates' parameters. */
+  projectParams?: (params: CompletionParams) => CompletionParams;
   /** Factory is deferred-async because external providers need core-agent
    *  loaded lazily. It may be rebuilt for a bounded retry or after an OAuth
    *  credential refresh; if rotation happens, we build the next candidate. */
@@ -246,6 +250,9 @@ export interface CreateRotatingProviderConfig {
    *  rotating-provider's primary label. Fires at most once per `complete`
    *  / `stream` invocation. */
   onCandidateChosen?: (info: { profileId: string; providerId: string; modelId: string }) => void;
+  /** One notification for every concrete upstream invocation, including
+   * same-candidate retries and candidates discarded before fallback. */
+  onAttemptSettled?: (info: ProviderAttemptObservation) => void;
   /** Reports configured and currently usable candidates even when no fallback
    * occurs. This keeps `candidate_count=0` from ambiguously meaning either
    * "one candidate" or "not observed" in sampled diagnostics. */
@@ -265,6 +272,18 @@ export interface CreateRotatingProviderConfig {
    * text/tool event. Applies only before the stream is committed, so a timed
    * out candidate can be replaced without duplicating visible output/tools. */
   firstEventTimeoutMs?: number;
+}
+
+export interface ProviderAttemptObservation {
+  startedAt: number;
+  finishedAt: number;
+  providerId: string;
+  modelId: string;
+  profileId: string;
+  candidateIndex: number;
+  attemptIndex: number;
+  status: 'completed' | 'failed' | 'cancelled';
+  usage?: Partial<Usage>;
 }
 
 export function createRotatingProvider(config: CreateRotatingProviderConfig): LLMProvider {
@@ -297,6 +316,15 @@ export function createRotatingProvider(config: CreateRotatingProviderConfig): LL
   // without this run-local latch the same "images omitted" notice repeats on
   // every remaining round of the turn.
   let imagesOmittedAnnounced = false;
+  let attemptSequence = 0;
+
+  const reportAttempt = (info: ProviderAttemptObservation): void => {
+    try { config.onAttemptSettled?.(info); }
+    catch (err) {
+      // Accounting is observational and must never break a model call.
+      log.warn('token usage observer failed', { error: err instanceof Error ? err.name : typeof err });
+    }
+  };
 
   const cooldownIdFor = (candidate: RotatingCandidate): string => (
     candidate.cooldownId || candidate.profileId
@@ -416,7 +444,7 @@ export function createRotatingProvider(config: CreateRotatingProviderConfig): LL
         ? Math.trunc(cand.maxTokens)
         : undefined;
     }
-    return next;
+    return cand.projectParams ? cand.projectParams(next) : next;
   }
 
   /** Read-only, request-local admission. Never compact, cool down a profile,
@@ -691,7 +719,7 @@ export function createRotatingProvider(config: CreateRotatingProviderConfig): LL
     usage?: Partial<Usage>;
   };
 
-  async function streamOne(cand: RotatingCandidate, params: CompletionParams): Promise<{
+  async function streamOne(cand: RotatingCandidate, candidateIndex: number, params: CompletionParams): Promise<{
     iterator: AsyncIterator<StreamEvent>;
     buffered: StreamEvent[];
     cleanup: () => void;
@@ -763,9 +791,55 @@ export function createRotatingProvider(config: CreateRotatingProviderConfig): LL
       } catch { /* best-effort disposal */ }
     };
 
+    const startedAt = Date.now();
+    const attemptIndex = ++attemptSequence;
     try {
-      const iter = provider.stream(paramsFor(cand, { ...params, signal: providerController.signal }));
-      iterator = (iter as AsyncIterable<StreamEvent>)[Symbol.asyncIterator]();
+      const raw = provider.stream(paramsFor(cand, { ...params, signal: providerController.signal }));
+      const rawIterator = raw[Symbol.asyncIterator]();
+      let usage: Partial<Usage> | undefined;
+      let settled = false;
+      const settle = (status: ProviderAttemptObservation['status']) => {
+        if (settled) return;
+        settled = true;
+        reportAttempt({ startedAt, finishedAt: Date.now(), providerId: cand.providerId,
+          modelId: cand.modelId, profileId: cand.profileId, candidateIndex,
+          attemptIndex, status, ...(usage ? { usage } : {}) });
+      };
+      iterator = {
+        next: async () => {
+          try {
+            const step = await rawIterator.next();
+            if (step.done) settle('failed');
+            else if (step.value.type === 'message_start') {
+              usage = step.value.usage;
+            } else if (step.value.type === 'message_end') {
+              usage = step.value.usage;
+              settle('completed');
+            } else if (step.value.type === 'error') settle('failed');
+            return step;
+          } catch (err) {
+            settle(parentSignal?.aborted ? 'cancelled' : 'failed');
+            throw err;
+          }
+        },
+        return: async (value?: unknown) => {
+          try {
+            const result = rawIterator.return
+              ? await rawIterator.return(value as never)
+              : { done: true, value } as IteratorResult<StreamEvent>;
+            settle(providerController.signal.aborted ? 'cancelled' : 'failed');
+            return result;
+          } catch (err) {
+            settle(parentSignal?.aborted ? 'cancelled' : 'failed');
+            throw err;
+          }
+        },
+        throw: async (err?: unknown) => {
+          settle(parentSignal?.aborted ? 'cancelled' : 'failed');
+          if (rawIterator.throw) return rawIterator.throw(err);
+          throw err;
+        },
+      };
     } catch (err) {
       disposeStream();
       if (parentSignal?.aborted) {
@@ -926,8 +1000,21 @@ export function createRotatingProvider(config: CreateRotatingProviderConfig): LL
             throwIfAborted((params as { signal?: AbortSignal }).signal);
             const provider = await cand.build();
             throwIfAborted((params as { signal?: AbortSignal }).signal);
-            const result = await provider.complete(paramsFor(cand, { ...params,
-              requestMetadata: admitted.get(cand)!.requestMetadata }));
+            const startedAt = Date.now();
+            const attemptIndex = ++attemptSequence;
+            let result: CompletionResult;
+            try {
+              result = await provider.complete(paramsFor(cand, { ...params,
+                requestMetadata: admitted.get(cand)!.requestMetadata }));
+              reportAttempt({ startedAt, finishedAt: Date.now(), providerId: cand.providerId,
+                modelId: cand.modelId, profileId: cand.profileId, candidateIndex: i + 1,
+                attemptIndex, status: 'completed', usage: result.usage });
+            } catch (err) {
+              reportAttempt({ startedAt, finishedAt: Date.now(), providerId: cand.providerId,
+                modelId: cand.modelId, profileId: cand.profileId, candidateIndex: i + 1,
+                attemptIndex, status: (params.signal?.aborted ? 'cancelled' : 'failed') });
+              throw err;
+            }
             throwIfAborted((params as { signal?: AbortSignal }).signal);
             if (isNormalEmptyCompletion(result)) {
               if (normalEmptyRetry < allowedNormalEmptyRetries) {
@@ -1042,7 +1129,7 @@ export function createRotatingProvider(config: CreateRotatingProviderConfig): LL
         let normalEmptyRecoveryActive = false;
 
         while (true) {
-          attempt = await streamOne(cand, { ...params,
+          attempt = await streamOne(cand, i + 1, { ...params,
             requestMetadata: admitted.get(cand)!.requestMetadata });
 
           if (!('rotatable' in attempt)) break;

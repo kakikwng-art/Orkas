@@ -99,7 +99,13 @@ import type { KeyFailureKind } from '../model/core-agent/auth-error';
 import { createLogger } from '../logger';
 import { t } from '../i18n';
 import { logErrorSummary } from '../util/log-redact';
-import { validateGrokBuildLogin } from '../model/core-agent/grok-build-provider';
+import {
+  inspectGrokBuildLogin,
+  spawnGrokBuildLogin,
+  validateGrokBuildLogin,
+  type GrokBuildLoginStatus,
+} from '../model/core-agent/grok-build-provider';
+import { bindAbort } from './local_agents/backends/base';
 import { sanitizeLogTextForUpload } from '../util/log-sanitize';
 import {
   ORKAS_API_BASE_URL,
@@ -1475,10 +1481,22 @@ export async function addLocalCliEntry(
   if (provider !== 'grok-build' || providerLocalCli(provider) !== 'grok') {
     throw new Error('unsupported local CLI model provider');
   }
-  if (!(await validateGrokBuildLogin())) {
+  const login = await inspectGrokBuildLogin();
+  if (login.state === 'unauthenticated') {
     throw new Error(t('provider.grok_build.login_required'));
   }
+  if (login.state !== 'authenticated') {
+    throw new Error('Unable to verify Grok login status. Retry authorization or check the Grok CLI installation.');
+  }
   return addApiKeyEntry(provider, modelId, 'local-cli:grok', label);
+}
+
+export async function getLocalCliAuthStatus(providerId: string): Promise<GrokBuildLoginStatus> {
+  const provider = String(providerId || '').trim();
+  if (provider !== 'grok-build' || providerLocalCli(provider) !== 'grok') {
+    throw new Error('unsupported local CLI model provider');
+  }
+  return inspectGrokBuildLogin();
 }
 
 export interface AddCustomModelEntryInput {
@@ -1956,7 +1974,7 @@ type FlowStatus =
   | { kind: 'awaiting_auth'; url: string; instructions?: string; usesCallbackServer?: boolean }
   | { kind: 'awaiting_input'; prompt: FlowPrompt }
   | { kind: 'progress'; message: string }
-  | { kind: 'done'; profileId: string }
+  | { kind: 'done'; profileId?: string; localCli?: true }
   | { kind: 'error'; error: string };
 
 interface Flow {
@@ -1972,6 +1990,7 @@ interface Flow {
    *  paste the code, whichever they prefer. */
   manualInputResolver?: (value: string) => void;
   abortController: AbortController;
+  cleanup?: () => void;
 }
 
 const flows = new Map<string, Flow>();
@@ -2073,6 +2092,7 @@ export async function startOAuth(
   const userId = getActiveUserId();
   const id = String(providerId || '').trim();
   if (!id) throw new Error('provider required');
+  if (id === 'grok-build') return startGrokBuildOAuth(userId, label);
   const oauth = await piOauth();
   const provider = await oauth.getOAuthProvider(id);
   assertActiveAuthOwner(userId);
@@ -2222,6 +2242,103 @@ export async function startOAuth(
   return { flowId, status: flow.status };
 }
 
+async function startGrokBuildOAuth(
+  userId: string,
+  label?: string,
+): Promise<{ flowId: string; status: FlowStatus }> {
+  assertActiveAuthOwner(userId);
+  const flowId = nextFlowId();
+  const flow: Flow = {
+    flowId,
+    userId,
+    provider: 'grok-build',
+    label: label ? sanitizeLabel(label) : 'default',
+    status: { kind: 'starting' },
+    abortController: new AbortController(),
+  };
+  flows.set(flowId, flow);
+
+  void (async () => {
+    try {
+      const child = await spawnGrokBuildLogin();
+      if (!isLiveOAuthFlow(flow)) {
+        try { child.kill('SIGKILL'); } catch { /* already stopped */ }
+        return;
+      }
+      const detachAbort = bindAbort(child, flow.abortController.signal, 1_000);
+      let finished = false;
+      let urlTail = '';
+      const timeout = setTimeout(() => {
+        if (finished || !isLiveOAuthFlow(flow)) return;
+        flow.status = { kind: 'error', error: 'Grok authorization timed out. Please try again.' };
+        try { flow.abortController.abort(); } catch { /* noop */ }
+      }, 5 * 60_000);
+      flow.cleanup = () => {
+        if (finished) return;
+        finished = true;
+        clearTimeout(timeout);
+        detachAbort();
+      };
+      flow.status = { kind: 'progress', message: 'Opening the official Grok authorization page…' };
+
+      const observe = (chunk: unknown) => {
+        if (!isLiveOAuthFlow(flow)) return;
+        urlTail = (urlTail + String(chunk || '')).slice(-4096);
+        const urls = urlTail.match(/https:\/\/[^\s<>"']+/gi) || [];
+        const official = urls.find((candidate) => {
+          try {
+            const host = new URL(candidate).hostname.toLowerCase();
+            return host === 'x.ai' || host.endsWith('.x.ai')
+              || host === 'grok.com' || host.endsWith('.grok.com');
+          } catch { return false; }
+        });
+        if (official && flow.status.kind !== 'awaiting_auth') {
+          flow.status = {
+            kind: 'awaiting_auth',
+            url: official,
+            instructions: 'Complete authorization in your browser. Orkas will refresh automatically.',
+            usesCallbackServer: false,
+          };
+        }
+      };
+      child.stdout.setEncoding('utf8');
+      child.stderr.setEncoding('utf8');
+      child.stdout.on('data', observe);
+      child.stderr.on('data', observe);
+      child.stdin.end();
+      child.once('error', () => {
+        flow.cleanup?.();
+        if (flow.abortController.signal.aborted) return;
+        flow.status = { kind: 'error', error: 'Unable to start the official Grok authorization command.' };
+      });
+      child.once('close', async (code) => {
+        flow.cleanup?.();
+        if (flow.abortController.signal.aborted || !isActiveAuthOwner(userId)) return;
+        if (code !== 0) {
+          flow.status = { kind: 'error', error: 'Grok authorization was cancelled or failed. Please try again.' };
+          return;
+        }
+        const status = await inspectGrokBuildLogin();
+        if (!isLiveOAuthFlow(flow)) return;
+        if (status.state === 'authenticated') {
+          invalidateCoreAgentRunner();
+          flow.status = { kind: 'done', localCli: true };
+        } else if (status.state === 'unauthenticated') {
+          flow.status = { kind: 'error', error: 'Grok authorization finished, but the CLI is still not signed in.' };
+        } else {
+          flow.status = { kind: 'error', error: 'Grok authorization finished, but Orkas could not verify the login status.' };
+        }
+      });
+    } catch {
+      if (isLiveOAuthFlow(flow)) {
+        flow.status = { kind: 'error', error: 'The Grok CLI is unavailable. Repair or reinstall the bundled CLI and try again.' };
+      }
+    }
+  })();
+
+  return { flowId, status: flow.status };
+}
+
 export function pollOAuthFlow(flowId: string): { status: FlowStatus } {
   const flow = ownedOAuthFlow(flowId);
   if (!flow) return { status: { kind: 'error', error: 'unknown flow' } };
@@ -2246,6 +2363,7 @@ export function cancelOAuthFlow(flowId: string): { ok: boolean } {
   const flow = ownedOAuthFlow(flowId);
   if (!flow) return { ok: false };
   try { flow.abortController.abort(); } catch { /* noop */ }
+  flow.cleanup?.();
   // Resolve both resolvers with empty string so pi-ai's flow drains out,
   // hits its `finally { server.close() }` and releases port 1455. Without
   // this a cancel mid-auth would leave the HTTP server bound and break
@@ -2654,10 +2772,17 @@ export async function testConnection(
 
   if (pid === 'grok-build') {
     const t0 = Date.now();
-    const ok = await validateGrokBuildLogin();
-    return ok
+    const status = await inspectGrokBuildLogin();
+    return status.state === 'authenticated'
       ? { ok: true, durationMs: Date.now() - t0, model: selectedModel, profileId: chosenProfileId }
-      : { ok: false, durationMs: Date.now() - t0, error: t('provider.grok_build.login_required'), profileId: chosenProfileId };
+      : {
+          ok: false,
+          durationMs: Date.now() - t0,
+          error: status.state === 'unauthenticated'
+            ? t('provider.grok_build.login_required')
+            : 'Unable to verify Grok login status. The CLI may be temporarily unavailable.',
+          profileId: chosenProfileId,
+        };
   }
 
   // Orkas-side external providers bypass pi-ai's catalog — route directly

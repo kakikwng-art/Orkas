@@ -100,3 +100,47 @@ export class AcpDiagnostics {
     };
   }
 }
+
+/** One-run, value-free probe for an ACP usage_update wire shape.
+ * It retains only bounded field paths and JavaScript value types. */
+export class AcpUsageShapeDiagnostics {
+  private events = 0;
+  private readonly fields = new Map<string, string>();
+
+  observe(update: unknown): void {
+    this.events += 1;
+    this.walk(update, '', 0);
+  }
+
+  snapshot(): { received: boolean; eventCount: number; fieldTypes: string[] } {
+    return {
+      received: this.events > 0,
+      eventCount: this.events,
+      fieldTypes: Array.from(this.fields, ([path, type]) => `${path}:${type}`).sort(),
+    };
+  }
+
+  private walk(value: unknown, prefix: string, depth: number): void {
+    if (depth > 4 || this.fields.size >= 48) return;
+    if (Array.isArray(value)) {
+      if (prefix) this.fields.set(prefix, 'array');
+      if (value.length) this.walk(value[0], `${prefix}[]`, depth + 1);
+      return;
+    }
+    if (value && typeof value === 'object') {
+      for (const [rawKey, child] of Object.entries(value as Record<string, unknown>)) {
+        if (this.fields.size >= 48) break;
+        // The discriminator is already known and its value is unnecessary.
+        if (depth === 0 && (rawKey === 'sessionUpdate' || rawKey === 'kind')) continue;
+        // Even field-presence metadata for content/identity is outside this
+        // diagnostic's scope. Token/usage names remain allowed.
+        if (/(prompt|text|content|message|reply|response|path|cwd|account|user|session|thread|secret|credential|authorization|api[_-]?key)/i.test(rawKey)) continue;
+        const key = /^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(rawKey) ? rawKey : '<redacted-key>';
+        const path = prefix ? `${prefix}.${key}` : key;
+        this.walk(child, path, depth + 1);
+      }
+      return;
+    }
+    if (prefix) this.fields.set(prefix, value === null ? 'null' : typeof value);
+  }
+}

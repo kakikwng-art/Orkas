@@ -23,6 +23,12 @@ import { getAgentIdleClock } from '../../util/system-activity';
 import { customModelImageSupport } from './custom-model-image-support';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { randomUUID } from 'node:crypto';
+import * as cliPermissions from '../../features/local_agents/cli_permissions';
+import type {
+  LocalCliPermissionDecision,
+  LocalCliPermissionRequest,
+} from '../../features/local_agents/backends/base';
 
 import {
   pickChatEntryGroup,
@@ -123,9 +129,15 @@ import {
   createCustomOpenAICompatibleProvider,
   omitReservedOutputLimitForProvider,
 } from './external-providers';
-import { buildGrokBuildModel, createGrokBuildProvider } from './grok-build-provider';
+import {
+  buildGrokBuildModel,
+  composeGrokBuildSystemPrompt,
+  createGrokBuildProvider,
+  projectGrokBuildCompletionParams,
+  type GrokCommanderBridgeFactory,
+} from './grok-build-provider';
 import { withTaskBudget } from './task-budget-provider';
-import { createRotatingProvider, type RotatingCandidate } from './rotating-provider';
+import { createRotatingProvider, type ProviderAttemptObservation, type RotatingCandidate } from './rotating-provider';
 import { clearCooldown } from './profile-cooldown';
 import {
   isExternalApiProvider,
@@ -143,6 +155,7 @@ import { hasAnySearchProfile } from '../../features/search_auth';
 import { buildConnectorSurface } from './connector-meta-tools';
 import { createLogger } from '../../logger';
 import { logErrorSummary, maskId } from '../../util/log-redact';
+import { saveTokenUsage, type TokenCallType } from '../../features/token_usage';
 import { repairOpenAIToolMessageOrder } from './openai-payload';
 import {
   DEEP_RESEARCH_EVIDENCE_STATE_KEY,
@@ -300,6 +313,17 @@ export interface BuildRunnerParams {
    *  resolution picks up the project-scoped selection. Resolved once at
    *  the top of group_chat::runTurn from `conv.project_id`. */
   projectId?: string;
+  /** Host-selected working directory for provider adapters that own their
+   * execution loop (notably the official Grok Build CLI). This must be an
+   * existing directory; the per-conversation artefact subdir is lazily
+   * created and therefore unsuitable as a CLI cwd. */
+  workingDir?: string;
+  /** Workspace root for CLI-like providers. `workingDir` may point at a
+   * lazily-created conversation subdir; providers that spawn a real process
+   * need the user-selected root, which always exists. */
+  providerWorkingDir?: string;
+  /** Commander-only host bridge factory for the Grok Build ACP turn. */
+  commanderBridge?: GrokCommanderBridgeFactory;
   /** Agent id bound to the conversation. Empty/undefined = default scope. */
   agentId?: string;
   /** Human-readable actor name used in user-facing local permission prompts. */
@@ -409,6 +433,7 @@ export interface BuildRunnerParams {
    *  not the rotating-provider's primary label. Fires at most once per
    *  call; not invoked when rotation rolls past a candidate. */
   onCandidateChosen?: (info: { profileId: string; providerId: string; modelId: string }) => void;
+  onProviderAttemptSettled?: (info: ProviderAttemptObservation) => void;
   /** Reports configured/currently available rotating-provider candidates even
    * when the call succeeds on the first candidate. */
   onCandidatesObserved?: (info: { candidateCount: number; availableCandidateCount: number }) => void;
@@ -1454,6 +1479,18 @@ export async function buildRunner(params: BuildRunnerParams): Promise<{
   // English, but their source language must not become the reply language.
   if (languageDirectiveBlock) parts.push(languageDirectiveBlock);
   const resolvedSystemPrompt = parts.join('\n\n');
+  const grokBuildSystemPrompt = !isCommander && group.some((choice) => choice.provider === 'grok-build')
+    ? (() => {
+        const { prompts } = require('../../prompts/loader') as typeof import('../../prompts/loader');
+        return composeGrokBuildSystemPrompt({
+          identityAndRules: prompts.load('chat_grok_text', {}),
+          userIntentRules: prompts.load('chat_user_intent_rules', {}),
+          projectInstructions: projectInstructionsBlock,
+          memory: memoryBlock,
+          languageDirective: languageDirectiveBlock,
+        });
+      })()
+    : '';
   // P2: the truly per-turn-volatile blocks — conditional orchestration rules,
   // the ledger JSON, and the datetime tail — do NOT go into the system prompt.
   // Even peeled to the tail they bust the
@@ -1479,6 +1516,13 @@ export async function buildRunner(params: BuildRunnerParams): Promise<{
     : undefined;
   const turnEphemeral = [
     orchestrationBlock,
+    volatileTail,
+    conversationBoardBlock,
+    conversationAssistanceBlock,
+  ]
+    .filter((b) => b && b.trim())
+    .join('\n\n');
+  const grokBuildTurnContext = [
     volatileTail,
     conversationBoardBlock,
     conversationAssistanceBlock,
@@ -1573,12 +1617,36 @@ export async function buildRunner(params: BuildRunnerParams): Promise<{
       answeredProviderId = info.providerId;
       params.onCandidateChosen?.(info);
     };
+    // Grok Commander runs the official ACP server, which carries native
+    // permission prompts. Bridge them into the same renderer approval dialog
+    // and IPC path as local Agents; the run id scopes "allow for this task"
+    // grants and is cleared when the Commander turn ends.
+    const grokCommanderRunId = isCommander && group.some(choice => choice.provider === 'grok-build')
+      ? randomUUID() : '';
+    const grokCommanderApproval = grokCommanderRunId && uid && params.cid
+      ? {
+          requestPermission: (request: LocalCliPermissionRequest) => cliPermissions.requestPermission({
+            uid,
+            cid: params.cid!,
+            runId: grokCommanderRunId,
+            agentId,
+            agentName: agentName || 'Grok Commander',
+            conversationTitle: params.conversationTitle,
+            cli: 'grok',
+            permissionPolicy: 'inherit',
+            request,
+          }),
+          onTurnEnd: () => cliPermissions.cancelForRun(grokCommanderRunId),
+          ...(params.commanderBridge ? { commanderBridge: params.commanderBridge } : {}),
+        }
+      : undefined;
     const rotating = await buildRotatingProvider(
       mod,
       providerId,
       group,
       params.onNativeSearchInjected,
       onCandidateChosen,
+      params.onProviderAttemptSettled,
       params.onCandidatesObserved,
       params.providerFirstEventTimeoutMs,
       uid || undefined,
@@ -1590,6 +1658,12 @@ export async function buildRunner(params: BuildRunnerParams): Promise<{
       params.cid,
       params.requireImageInput,
       params.onRequestFailure,
+      grokBuildSystemPrompt,
+      turnEphemeral,
+      grokBuildTurnContext,
+      params.providerWorkingDir ?? params.workingDir,
+      isCommander,
+      grokCommanderApproval,
     );
     // Inject the rotating provider into BOTH the factory slot AND the
     // pre-built instance cache. ProviderRegistry.get() short-circuits on
@@ -1771,6 +1845,13 @@ export function skillSearchExposureFromSessionId(sessionId: string): boolean {
 async function buildExternalProvider(
   choice: ChatEntryChoice,
   usageContext?: OrkasApiUsageContext,
+  grokOptions?: {
+    workingDir?: string;
+    commander?: boolean;
+    requestPermission?: (request: LocalCliPermissionRequest) => Promise<LocalCliPermissionDecision>;
+    onCommanderTurnEnd?: () => void;
+    commanderBridge?: GrokCommanderBridgeFactory;
+  },
 ): Promise<LLMProvider> {
   const { provider: providerId, apiKey, model: modelId } = choice;
   switch (providerId) {
@@ -1783,7 +1864,7 @@ async function buildExternalProvider(
     case 'doubao':
       return await createDoubaoProvider({ apiKey, modelId });
     case 'grok-build':
-      return createGrokBuildProvider(modelId);
+      return createGrokBuildProvider(modelId, grokOptions);
     case 'custom':
       if (!choice.customConfig) throw new Error('custom model configuration is incomplete');
       return await createCustomOpenAICompatibleProvider({
@@ -1822,6 +1903,7 @@ async function buildRotatingProvider(
   group: ChatEntryChoice[],
   onNativeSearchInjected?: (info: NativeSearchInjectedInfo) => void,
   onCandidateChosen?: (info: { profileId: string; providerId: string; modelId: string }) => void,
+  onProviderAttemptSettled?: (info: ProviderAttemptObservation) => void,
   onCandidatesObserved?: (info: { candidateCount: number; availableCandidateCount: number }) => void,
   firstEventTimeoutMs?: number,
   userId?: string,
@@ -1830,6 +1912,16 @@ async function buildRotatingProvider(
   cid?: string,
   requireImageInput = false,
   onRequestFailure?: (failure: ProviderRequestFailure) => void,
+  grokBuildSystemPrompt = '',
+  grokBuildFullTurnContext = '',
+  grokBuildTextOnlyTurnContext = '',
+  grokBuildWorkingDir?: string,
+  grokBuildCommander = false,
+  grokCommanderApproval?: {
+    requestPermission: (request: LocalCliPermissionRequest) => Promise<LocalCliPermissionDecision>;
+    onTurnEnd: () => void;
+    commanderBridge?: GrokCommanderBridgeFactory;
+  },
 ): Promise<LLMProvider> {
   const candidates: RotatingCandidate[] = group.map((choice) => {
     const candProviderId = choice.provider;
@@ -1851,6 +1943,18 @@ async function buildRotatingProvider(
       modelId: candModelId,
       contextWindow: candidateModel?.contextWindow,
       maxInputImages,
+      ...(candProviderId === 'grok-build' && grokBuildSystemPrompt
+        ? { projectParams: (request: import('#core-agent').CompletionParams) => (
+            projectGrokBuildCompletionParams(
+              request,
+              grokBuildSystemPrompt,
+              {
+                full: grokBuildFullTurnContext,
+                textOnly: grokBuildTextOnlyTurnContext,
+              },
+            )
+          ) }
+        : {}),
       ...(candProviderId === 'custom' && userId && choice.customConfig
         ? { imageSupport: customModelImageSupport({ userId, profileId: choice.profileId,
             modelId: candModelId, apiKey: choice.apiKey, config: choice.customConfig }) }
@@ -1868,7 +1972,23 @@ async function buildRotatingProvider(
       } } : {}),
       build: async () => {
         if (isExternal) {
-          return withTaskBudget(await buildExternalProvider({ ...choice, apiKey: currentApiKey }, usageContext), cid);
+          return withTaskBudget(await buildExternalProvider(
+            { ...choice, apiKey: currentApiKey },
+            usageContext,
+            candProviderId === 'grok-build'
+              ? {
+                  workingDir: grokBuildWorkingDir,
+                  commander: grokBuildCommander,
+                  ...(grokBuildCommander && grokCommanderApproval ? {
+                    requestPermission: grokCommanderApproval.requestPermission,
+                    onCommanderTurnEnd: grokCommanderApproval.onTurnEnd,
+                    ...(grokCommanderApproval.commanderBridge
+                      ? { commanderBridge: grokCommanderApproval.commanderBridge }
+                      : {}),
+                  } : {}),
+                }
+              : undefined,
+          ), cid);
         }
         if (resolvedModel?.isConfiguredFallback) {
           log.info('using configured model fallback', {
@@ -1913,10 +2033,62 @@ async function buildRotatingProvider(
       clearCooldown(candidate.cooldownId || profileId);
     },
     ...(onCandidateChosen ? { onCandidateChosen } : {}),
+    ...(onProviderAttemptSettled ? { onAttemptSettled: onProviderAttemptSettled } : {}),
     ...(onCandidatesObserved ? { onCandidatesObserved } : {}),
     ...(onRequestFailure ? { onRequestFailure } : {}),
     ...(Number.isFinite(firstEventTimeoutMs) ? { firstEventTimeoutMs } : {}),
   });
+}
+
+interface DirectModelUsageIdentity {
+  userId: string;
+  callType: Extract<TokenCallType, 'web_app_generate' | 'skill_correction' | 'dispatch_planner'>;
+  sessionId?: string;
+  conversationId?: string;
+  turnId?: string;
+  projectId?: string;
+  taskId?: string;
+  agentId?: string;
+  actorId?: string;
+  parentRequestId?: string;
+}
+
+/** Reuse the same per-upstream-attempt accounting as ordinary Core Agent
+ * turns without creating an Agent session or recording model content. */
+function observeDirectModelUsage(identity: DirectModelUsageIdentity): (info: ProviderAttemptObservation) => void {
+  const invocationId = randomUUID();
+  return (info) => {
+    try {
+      saveTokenUsage(identity.userId, {
+        eventId: `direct:${identity.callType}:${invocationId}:${info.attemptIndex}`,
+        startedAt: info.startedAt,
+        finishedAt: info.finishedAt,
+        provider: info.providerId,
+        model: info.modelId,
+        source: 'core',
+        callType: identity.callType,
+        status: info.status,
+        usage: info.usage,
+        projectId: identity.projectId ?? null,
+        taskId: identity.taskId ?? null,
+        conversationId: identity.conversationId ?? null,
+        sessionId: identity.sessionId ?? null,
+        turnId: identity.turnId ?? null,
+        agentId: identity.agentId ?? null,
+        actorId: identity.actorId ?? null,
+        callId: `${invocationId}:${info.attemptIndex}`,
+        parentRequestId: identity.parentRequestId ?? null,
+        attemptIndex: info.attemptIndex,
+        candidateIndex: info.candidateIndex,
+        profileId: info.profileId,
+      });
+    } catch (err) {
+      log.warn('direct model token usage ledger write failed', {
+        call_type: identity.callType,
+        error: logErrorSummary(err),
+      });
+    }
+  };
 }
 
 /** Pure app inference: reuse provider construction, with one configured candidate
@@ -1926,6 +2098,7 @@ export async function generateWebAppText(
   input: { prompt: string; maxTokens?: number },
   signal: AbortSignal,
   progress: (event: { type: 'delta'; text: string }) => void,
+  identity?: { sessionId?: string; taskId?: string },
 ): Promise<{ text: string; usage: Record<string, number>; stopReason: string }> {
   const { getActiveUserId } = await import('../../features/users');
   const check = () => {
@@ -1938,8 +2111,16 @@ export async function generateWebAppText(
   if (!group.length) throw new Error('app model unavailable');
   const mod = await ca();
   const primary = group[0];
-  const provider = await buildRotatingProvider(mod, primary.provider, group, undefined, undefined, undefined,
-    undefined, uid, { networkRetryAttempts: 0, normalEmptyRetryAttempts: 0 });
+  const provider = await buildRotatingProvider(mod, primary.provider, group, undefined, undefined,
+    observeDirectModelUsage({
+      userId: uid,
+      callType: 'web_app_generate',
+      sessionId: identity?.sessionId,
+      taskId: identity?.taskId,
+      actorId: 'web_app',
+      parentRequestId: identity?.taskId,
+    }),
+    undefined, undefined, uid, { networkRetryAttempts: 0, normalEmptyRetryAttempts: 0 });
   check();
   let text = '';
   let stopReason = '';
@@ -1979,6 +2160,10 @@ export async function completeSkillCreationCorrection(input: {
   userId: string;
   cid: string;
   turnId: string;
+  sessionId?: string;
+  agentId?: string;
+  projectId?: string;
+  triggerMessageId?: string;
   message: string;
   signal: AbortSignal;
 }): Promise<string> {
@@ -1996,7 +2181,18 @@ export async function completeSkillCreationCorrection(input: {
   const mod = await ca();
   const primary = group[0];
   const provider = await buildRotatingProvider(mod, primary.provider, group,
-    undefined, undefined, undefined, 45_000, input.userId,
+    undefined, undefined, observeDirectModelUsage({
+      userId: input.userId,
+      callType: 'skill_correction',
+      sessionId: input.sessionId,
+      conversationId: input.cid,
+      turnId: input.turnId,
+      projectId: input.projectId,
+      taskId: input.triggerMessageId,
+      agentId: input.agentId,
+      actorId: input.agentId,
+      parentRequestId: input.triggerMessageId,
+    }), undefined, 45_000, input.userId,
     { networkRetryAttempts: 0, normalEmptyRetryAttempts: 0 }, undefined, input.cid);
   check();
   const result = await provider.complete({
@@ -2025,6 +2221,9 @@ export async function completeDispatchPlan(input: {
   userId: string;
   cid: string;
   turnId: string;
+  sessionId?: string;
+  projectId?: string;
+  triggerMessageId?: string;
   message: string;
   signal: AbortSignal;
 }): Promise<string> {
@@ -2042,7 +2241,18 @@ export async function completeDispatchPlan(input: {
   const mod = await ca();
   const primary = group[0];
   const provider = await buildRotatingProvider(mod, primary.provider, group,
-    undefined, undefined, undefined, 20_000, input.userId,
+    undefined, undefined, observeDirectModelUsage({
+      userId: input.userId,
+      callType: 'dispatch_planner',
+      sessionId: input.sessionId,
+      conversationId: input.cid,
+      turnId: input.turnId,
+      projectId: input.projectId,
+      taskId: input.triggerMessageId,
+      agentId: 'commander',
+      actorId: 'commander',
+      parentRequestId: input.triggerMessageId,
+    }), undefined, 20_000, input.userId,
     { networkRetryAttempts: 0, normalEmptyRetryAttempts: 0 }, undefined, input.cid);
   check();
   const result = await provider.complete({

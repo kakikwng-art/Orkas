@@ -58,6 +58,7 @@ import {
 } from '../../storage';
 import * as path from 'node:path';
 import * as fs from 'node:fs';
+import * as os from 'node:os';
 import { inspectCodingDirectory } from '../local_agents/project-directory';
 import { getActiveUserId } from '../users';
 import type {
@@ -2436,10 +2437,12 @@ async function _enqueueBody(
   // Resolve the project before parsing names: an unavailable Agent is plain
   // text, not a segment that can be discarded after routing.
   let projectAgentIds: Set<string> | null = null;
+  let conversationProjectId: string | undefined;
   try {
     const { getConversation } = await import('../chats');
     const conv = await getConversation(uid, cid);
     if (conv?.project_id) {
+      conversationProjectId = conv.project_id;
       const { resolveProjectScope } = await import('../projects');
       const scope = await resolveProjectScope(uid, conv.project_id);
       if (scope) projectAgentIds = new Set(scope.agents);
@@ -2873,6 +2876,7 @@ async function _enqueueBody(
   if (plannedDispatch && plannerCandidates) {
     floorTargets = await _dispatchPlannedUserSend(state, {
       uid, cid, msg, msgId, fromActorId, params, text: plannerText,
+      projectId: conversationProjectId,
       candidates: plannerCandidates,
       roster: refreshed.actors,
       registryActors,
@@ -4340,6 +4344,7 @@ async function _planAndQueueUserSend(state: CidState, input: {
   candidates: readonly string[];
   roster: readonly Actor[];
   registryActors: ReadonlyMap<string, Actor>;
+  projectId?: string;
 }): Promise<string[]> {
   const { uid, cid, msg, msgId, fromActorId, params } = input;
   const epoch = state.abortEpoch;
@@ -4380,8 +4385,12 @@ async function _planAndQueueUserSend(state: CidState, input: {
   (state.planningControllers ??= new Set()).add(controller);
   let planned: DispatchPlanResult;
   try {
+    const plannerTurnId = genId12();
     planned = await planUserDispatch({
-      uid, cid, turnId: genId12(),
+      uid, cid, turnId: plannerTurnId,
+      sessionId: `dispatch-planner-${cid}-${msgId}`,
+      projectId: input.projectId,
+      triggerMessageId: msgId,
       text: input.text,
       candidates,
       // Explicit UI quotes are part of this request's context even when the
@@ -6732,6 +6741,128 @@ async function runActorTurnWithDisplay(
     // exists. Only a failure with no visible content retries; once text is
     // on screen a silent re-run would duplicate it, so that case keeps the
     // honest failure bubble + partial salvage + manual retry.
+    // Provider adapters that own their execution loop (Grok Build CLI) spawn a
+    // real process, so their cwd must be an existing directory. `workingDir`
+    // above is the per-conversation artefact subdir, which is created lazily
+    // on first write; hand CLI providers the selected workspace root instead.
+    const providerWorkingDir = (await import('../user_workspace')).getWorkspacePath(uid, turnProjectId);
+    // Commander ACP sessions cannot see host tools, so the only real
+    // delegation path is the orkas-bridge MCP server. `commander.dispatch`
+    // runs the same scheduled Agent sub-task as the API Commander's
+    // `dispatch_to` and returns the settled worker result to the CLI. The
+    // bridge surface is scoped to that one capability: this session cannot
+    // reach skills, connectors, tasks, memory or outputs.
+    const commanderBridge = isCommander
+      ? async (signal: AbortSignal) => {
+          const [{ startBridge }, { buildSkillSandboxEnv }] = await Promise.all([
+            import('../local_agents/bridge'),
+            import('../../model/core-agent/client'),
+          ]);
+          const runId = genId12();
+          const configDir = path.join(os.tmpdir(), `orkas-commander-bridge-${runId}`);
+          fs.mkdirSync(configDir, { recursive: true, mode: 0o700 });
+          const handle = await startBridge({
+            uid,
+            cid,
+            agentId: COMMANDER_ID,
+            agentName: actor.name || 'Commander',
+            ...(turnConversationTitle ? { conversationTitle: turnConversationTitle } : {}),
+            cli: 'grok',
+            permissionPolicy: 'inherit',
+            currentMessageId: item.msgId,
+            ...(turnProjectId ? { projectId: turnProjectId } : {}),
+            ...(providerWorkingDir ? { workingDir: providerWorkingDir } : {}),
+            signal,
+            runId,
+            configDir,
+            sandboxEnv: buildSkillSandboxEnv(uid, COMMANDER_ID),
+            allowedCapabilities: ['commander.dispatch'],
+            dispatchCommanderTask: async (request) => {
+              try {
+                const resolvedId = await resolveDispatchTarget(cid, request.to);
+                if (!resolvedId) {
+                  return { ok: false, error: await _unknownDispatchTargetError(uid, request.to) };
+                }
+                if (resolvedId === COMMANDER_ID || resolvedId === USER_ID) {
+                  return { ok: false, error: 'dispatch target must be an agent (not commander / user)' };
+                }
+                const dispatchAgent = await agentsFeat.getAgent(resolvedId);
+                const agentLabel = dispatchAgent?.name || resolvedId;
+                const waitingRefusal = await _waitingAgentDelegationRefusal(state, resolvedId, agentLabel, w.item);
+                if (waitingRefusal) return { ok: false, error: waitingRefusal };
+                const dispatchActor: Actor = {
+                  kind: 'agent', id: resolvedId, name: agentLabel, joined_at: nowIso(),
+                };
+                const result = await runScheduledDispatch(
+                  state, w.abortController?.signal, dispatchActor, request.message, {
+                    floorChoiceRevision: w.item?.floorChoiceRevision,
+                    ...(item.attachments?.length ? { attachments: item.attachments } : {}),
+                    sourceContext: {
+                      ..._buildNestedDispatchSourceContext({
+                        currentMessageId: item.msgId,
+                        currentReferences: item.references,
+                      }),
+                      commanderRetryResumeInstruction: request.resume
+                        || _defaultResumeInstructionForRetriedDispatch(agentLabel),
+                    },
+                    ...(w.item?.taskId ? { parentTaskId: w.item.taskId } : {}),
+                  },
+                );
+                const userGoal = _unwrapLlmTurnPayload(item.llmPayload) || item.llmPayload;
+                try {
+                  await _setFormWaitLedgerFromWorkerResult({
+                    uid, cid,
+                    result,
+                    ownerAgentId: resolvedId,
+                    ownerAgentName: agentLabel,
+                    userGoal,
+                    agentTask: request.message,
+                    resume: request.resume,
+                    sourceTool: 'dispatch_to',
+                    ...(result.taskId ? { taskId: result.taskId } : {}),
+                  });
+                } catch (err) {
+                  log.warn(`commander.dispatch form ledger set failed cid=${cid}: ${(err as Error).message}`);
+                }
+                try {
+                  await _setUserWaitResumeFromWorkerResult({
+                    uid, cid,
+                    result,
+                    ownerAgentId: resolvedId,
+                    ownerAgentName: agentLabel,
+                    userGoal,
+                    agentTask: request.message,
+                    resume: request.resume,
+                  });
+                } catch (err) {
+                  log.warn(`commander.dispatch user-wait resume set failed cid=${cid}: ${(err as Error).message}`);
+                }
+                return {
+                  ok: true,
+                  payload: result.payload,
+                  ...(result.taskId ? { taskId: result.taskId } : {}),
+                  ...(result.aborted ? { aborted: true } : {}),
+                };
+              } catch (err) {
+                return { ok: false, error: (err as Error).message || 'dispatch failed' };
+              }
+            },
+          });
+          return {
+            mcpConfigPath: handle.mcpConfigPath,
+            server: {
+              command: handle.serverEnv.ORKAS_NODE,
+              args: [`${handle.serverEnv.ORKAS_PC_DIR}/bin/orkas-bridge.cjs`],
+              env: handle.serverEnv,
+            },
+            close: async () => {
+              try { await handle.close(); } finally {
+                try { fs.rmSync(configDir, { recursive: true, force: true }); } catch { /* best effort */ }
+              }
+            },
+          };
+        }
+      : undefined;
     const runModelAttempt = async (channelAttempt: number): Promise<void> => {
     try {
       const actorMaxToolLoops = maxToolLoopsForActorKind(actor.kind);
@@ -6741,6 +6872,8 @@ async function runActorTurnWithDisplay(
         sessionId,
         systemPrompt,
         workingDir,
+        ...(providerWorkingDir ? { providerWorkingDir } : {}),
+        ...(commanderBridge ? { commanderBridge } : {}),
         ...(conversationHistory ? { conversationHistory } : {}),
         agentName: actor.name || actor.id,
         ...(actor.kind === 'agent' ? { agentId: actor.id } : {}),
@@ -7552,7 +7685,8 @@ async function runActorTurnWithDisplay(
                 });
                 const text = await Promise.race([
                   completeSkillCreationCorrection({ userId: uid, cid, turnId: item.turnId,
-                    message, signal: controller.signal }),
+                    sessionId, agentId: actor.id, projectId: turnProjectId,
+                    triggerMessageId: item.msgId, message, signal: controller.signal }),
                   cancelled,
                 ]);
                 const corrected = await correction.applySkillCreationCorrection(text, container, uid, controller.signal);

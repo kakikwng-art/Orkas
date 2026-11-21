@@ -36,6 +36,9 @@
  *     callback without changing bytes; an empty declaration clears selection.
  *   - commander.handoff — records one bounded, run-local request for the bus;
  *     it does not expose any Commander mutation or orchestration method.
+ *   - commander.dispatch — Commander ACP sessions only: runs one real OrkaS
+ *     Agent through the host and returns the settled worker result to the
+ *     calling CLI. Granted only when the host supplies the dispatch callback.
  *
  * Protocol: NDJSON over the socket.
  *   request  {id, token, method, params}
@@ -146,11 +149,29 @@ export type BridgeCapability =
   | 'memory.agent'
   | 'project.context.write'
   | 'outputs.publish'
-  | 'commander.handoff';
+  | 'commander.handoff'
+  | 'commander.dispatch';
 
 export interface CommanderHandoffRequest {
   reason: string;
   context?: string;
+}
+
+/** One real Agent dispatch requested by a Commander ACP session. */
+export interface CommanderDispatchRequest {
+  to: string;
+  message: string;
+  resume?: string;
+}
+
+/** Settled worker outcome returned to the Commander; `payload` is the same
+ *  worker-result shape the in-process `dispatch_to` tool returns. */
+export interface CommanderDispatchOutcome {
+  ok: boolean;
+  payload?: string;
+  taskId?: string;
+  aborted?: boolean;
+  error?: string;
 }
 
 /** Host-only observation; never a model receipt, permission grant or public event. */
@@ -200,6 +221,12 @@ export interface StartBridgeOpts {
    * invoking skills.list in this host. Prime display metadata only for that
    * path; fresh runs keep Skill discovery lazy. */
   preloadSkillDisplayNames?: boolean;
+  /** Commander ACP sessions: run a real OrkaS Agent through the host and
+   *  return its settled result. Supplying this grants `commander.dispatch`. */
+  dispatchCommanderTask?: (request: CommanderDispatchRequest) => Promise<CommanderDispatchOutcome>;
+  /** Restrict the granted surface to this exact set. Commander bridges use
+   *  `['commander.dispatch']` so the ACP session gets orchestration only. */
+  allowedCapabilities?: readonly BridgeCapability[];
 }
 
 function _socketPath(runId: string): string {
@@ -239,6 +266,7 @@ async function _capabilitiesForRun(
   recordConnectorDisplayName: (id: string, name: string) => void,
 ): Promise<BridgeCapability[]> {
   const capabilities = [...BASE_CAPABILITIES];
+  if (opts.dispatchCommanderTask) capabilities.push('commander.dispatch');
   if (browserTaskRunId(opts.uid, opts.cid)) capabilities.push('browser');
   if (!opts.projectId || await projectExists(opts.uid, opts.projectId)) {
     capabilities.push('tasks.read', 'tasks.write', 'automation');
@@ -265,6 +293,15 @@ async function _capabilitiesForRun(
     });
   }
   return capabilities;
+}
+
+function _scopeCapabilities(
+  capabilities: BridgeCapability[],
+  allowed: readonly BridgeCapability[] | undefined,
+): BridgeCapability[] {
+  if (!allowed) return capabilities;
+  const allowedSet = new Set(allowed);
+  return capabilities.filter((capability) => allowedSet.has(capability));
 }
 
 function _buildMethods(
@@ -711,6 +748,36 @@ function _buildMethods(
     },
   });
 
+  if (capabilities.has('commander.dispatch') && opts.dispatchCommanderTask) {
+    const dispatchCommanderTask = opts.dispatchCommanderTask;
+    Object.assign(methods, {
+      'commander.dispatch': async (params) => {
+        const to = String(params.to || '').trim();
+        const message = String(params.message || '').trim();
+        const resume = String(params.resume || '').trim();
+        if (!to) throw new Error('to required');
+        if (to.length > 200) throw new Error('to exceeds 200 characters');
+        if (!message) throw new Error('message required');
+        if (message.length > 12_000) throw new Error('message exceeds 12000 characters');
+        if (resume.length > 6_000) throw new Error('resume exceeds 6000 characters');
+        const outcome = await dispatchCommanderTask({
+          to,
+          message,
+          ...(resume ? { resume } : {}),
+        });
+        if (!outcome.ok) {
+          return { ok: false, error: outcome.error || 'dispatch failed' };
+        }
+        return {
+          ok: true,
+          ...(outcome.taskId ? { task_id: outcome.taskId } : {}),
+          ...(outcome.aborted ? { aborted: true } : {}),
+          result: outcome.payload || '',
+        };
+      },
+    });
+  }
+
   return {
     methods,
     preloadSkillDisplayNames: async () => {
@@ -736,7 +803,10 @@ export async function startBridge(opts: StartBridgeOpts): Promise<BridgeHandle> 
     const normalizedName = String(name || '').trim();
     if (normalizedId && normalizedName) connectorDisplayNameById.set(normalizedId, normalizedName);
   };
-  const capabilities = await _capabilitiesForRun(opts, recordConnectorDisplayName);
+  const capabilities = _scopeCapabilities(
+    await _capabilitiesForRun(opts, recordConnectorDisplayName),
+    opts.allowedCapabilities,
+  );
   const capabilitySet = new Set(capabilities);
   let closed = false;
   let commanderHandoff: CommanderHandoffRequest | null = null;

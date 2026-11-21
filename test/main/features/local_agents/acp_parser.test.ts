@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { handleAcpMessage } from '../../../../src/main/features/local_agents/backends/_acp';
+import { AcpUsageShapeDiagnostics } from '../../../../src/main/features/local_agents/backends/acp-diagnostics';
 
 function makeHandlers() {
   return {
@@ -9,6 +10,7 @@ function makeHandlers() {
     onToolUse: vi.fn(),
     onToolResult: vi.fn(),
     onMediaOutput: vi.fn(),
+    onUsageUpdate: vi.fn(),
     onPromptResult: vi.fn(),
     onUnknown: vi.fn(),
   };
@@ -156,6 +158,42 @@ describe('local_agents/backends/_acp › handleAcpMessage', () => {
       params: { update: { kind: 'something_new', payload: 1 } },
     }, h);
     expect(h.onUnknown).toHaveBeenCalled();
+  });
+
+  it('routes only the usage update body to diagnostics without guessing token fields', () => {
+    const h = makeHandlers();
+    const event = {
+      method: 'session/update',
+      params: { update: { sessionUpdate: 'usage_update', vendorCounters: { opaque: 7 } } },
+    };
+    handleAcpMessage(event, h);
+    expect(h.onUsageUpdate).toHaveBeenCalledWith(event.params.update);
+    expect(h.onUnknown).not.toHaveBeenCalled();
+    expect(h.onPromptResult).not.toHaveBeenCalled();
+  });
+
+  it('records only bounded usage field paths, types, and event count', () => {
+    const diagnostic = new AcpUsageShapeDiagnostics();
+    diagnostic.observe({ sessionUpdate: 'usage_update', usage: {
+      inputTokens: 12, nested: [{ cache: 3 }], account: 'private-account',
+      prompt: 'private prompt', path: 'C:/private/file',
+    } });
+    diagnostic.observe({ sessionUpdate: 'usage_update', usage: { inputTokens: 18 } });
+    const snapshot = diagnostic.snapshot();
+    expect(snapshot).toMatchObject({ received: true, eventCount: 2 });
+    expect(snapshot.fieldTypes).toEqual(expect.arrayContaining([
+      'usage.inputTokens:number', 'usage.nested:array', 'usage.nested[].cache:number',
+    ]));
+    expect(snapshot.fieldTypes).not.toEqual(expect.arrayContaining([
+      'usage.account:string', 'usage.prompt:string', 'usage.path:string',
+    ]));
+    const serialized = JSON.stringify(snapshot);
+    expect(serialized).not.toContain('private-account');
+    expect(serialized).not.toContain('private prompt');
+    expect(serialized).not.toContain('C:/private/file');
+    expect(new AcpUsageShapeDiagnostics().snapshot()).toEqual({
+      received: false, eventCount: 0, fieldTypes: [],
+    });
   });
 
   it('ignores unrelated request errors silently', () => {

@@ -382,6 +382,74 @@ describe('local_agents/backends/_acp process lifecycle', () => {
     });
   });
 
+  it('waits for the initialize acknowledgement before asking for a session', async () => {
+    // Grok reloads and silently refreshes its cached token while answering
+    // `initialize` (~1s). A session request that overtakes that reply is
+    // rejected with -32000 "Authentication required / no auth method id
+    // provided" and the turn dies before the prompt can run.
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'orkas-acp-late-init-'));
+    const fakeAcpServer = String.raw`
+      const fs = require('node:fs');
+      let buffer = '';
+      let acknowledged = false;
+      const send = (message) => process.stdout.write(JSON.stringify(message) + '\n');
+      setTimeout(() => { acknowledged = true; }, 400);
+      process.stdin.setEncoding('utf8');
+      process.stdin.on('data', (chunk) => {
+        buffer += chunk;
+        let newline;
+        while ((newline = buffer.indexOf('\n')) >= 0) {
+          const line = buffer.slice(0, newline);
+          buffer = buffer.slice(newline + 1);
+          if (!line.trim()) continue;
+          const message = JSON.parse(line);
+          if (message.method === 'initialize') {
+            setTimeout(() => send({ jsonrpc: '2.0', id: message.id, result: { protocolVersion: 1 } }), 400);
+          } else if (message.method === 'session/new') {
+            if (!acknowledged) {
+              fs.writeFileSync('early-session-request', 'overtook initialize');
+              send({ jsonrpc: '2.0', id: message.id, error: { code: -32000, message: 'Authentication required' } });
+            } else {
+              send({ jsonrpc: '2.0', id: message.id, result: { sessionId: 'late-init-session' } });
+            }
+          } else if (message.method === 'session/prompt') {
+            send({
+              jsonrpc: '2.0',
+              method: 'session/update',
+              params: { update: { sessionUpdate: 'agent_message_chunk', content: { text: 'ready' } } },
+            });
+            send({ jsonrpc: '2.0', id: message.id, result: { stopReason: 'end_turn' } });
+          }
+        }
+      });
+    `;
+    const events: any[] = [];
+    try {
+      await makeAcpBackend({
+        logName: 'local-agents:test-acp',
+        argv: ['-e', fakeAcpServer],
+        clientName: 'orkas-test',
+      }).run({
+        binPath: TEST_NODE,
+        prompt: 'inspect the workspace',
+        cwd: root,
+        signal: new AbortController().signal,
+        timeoutMs: 3_000,
+        onEvent: event => events.push(event),
+      });
+
+      expect(fs.existsSync(path.join(root, 'early-session-request'))).toBe(false);
+      expect(events.at(-1)).toMatchObject({
+        type: 'done',
+        status: 'completed',
+        output: 'ready',
+        sessionId: 'late-init-session',
+      });
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it('resumes the requested ACP session and still asks Orkas for the current task permission', async () => {
     const fakeAcpServer = String.raw`
       let buffer = '';
@@ -640,6 +708,92 @@ describe('local_agents/backends/_acp process lifecycle', () => {
       type: 'done',
       status: 'completed',
       output: 'denied safely',
+    });
+  });
+
+  it('forwards the permission target and terminal usage without inventing values', async () => {
+    const fakeAcpServer = String.raw`
+      let buffer = '';
+      let promptRequestId = null;
+      const send = (message) => process.stdout.write(JSON.stringify(message) + '\n');
+      process.stdin.setEncoding('utf8');
+      process.stdin.on('data', (chunk) => {
+        buffer += chunk;
+        let newline;
+        while ((newline = buffer.indexOf('\n')) >= 0) {
+          const line = buffer.slice(0, newline);
+          buffer = buffer.slice(newline + 1);
+          if (!line.trim()) continue;
+          const message = JSON.parse(line);
+          if (message.method === 'initialize') {
+            send({ jsonrpc: '2.0', id: message.id, result: { protocolVersion: 1 } });
+          } else if (message.method === 'session/new') {
+            send({ jsonrpc: '2.0', id: message.id, result: { sessionId: 'acp-usage-session' } });
+          } else if (message.method === 'session/prompt') {
+            promptRequestId = message.id;
+            send({
+              jsonrpc: '2.0', id: 79, method: 'session/request_permission',
+              params: {
+                sessionId: 'acp-usage-session',
+                toolCall: {
+                  kind: 'edit', title: 'Update app entry',
+                  rawInput: {
+                    path: 'src/app.ts',
+                    command: 'apply_patch',
+                    description: 'Write the new app entry',
+                  },
+                },
+                options: [
+                  { optionId: 'allow_once', kind: 'allow_once' },
+                  { optionId: 'deny', kind: 'reject_once' },
+                ],
+              },
+            });
+          } else if (message.id === 79) {
+            send({ jsonrpc: '2.0', method: 'session/update', params: {
+              sessionId: 'acp-usage-session',
+              update: { sessionUpdate: 'agent_message_chunk', content: { text: 'edited' } },
+            } });
+            send({ jsonrpc: '2.0', id: promptRequestId, result: {
+              stopReason: 'end_turn',
+              _meta: { totalUsage: {
+                inputTokens: 120, outputTokens: 30, cachedReadTokens: 40, totalTokens: 150,
+              } },
+            } });
+          }
+        }
+      });
+    `;
+    const backend = makeAcpBackend({
+      logName: 'local-agents:test-acp-usage',
+      argv: ['-e', fakeAcpServer],
+      clientName: 'orkas-test',
+    });
+    const events: any[] = [];
+    const requestPermission = vi.fn(async () => 'allow_once' as const);
+
+    await backend.run({
+      binPath: TEST_NODE,
+      prompt: 'edit the app',
+      permissionPolicy: 'ask',
+      requestPermission,
+      cwd: process.cwd(),
+      signal: new AbortController().signal,
+      timeoutMs: 2_000,
+      onEvent: event => events.push(event),
+    });
+
+    expect(requestPermission).toHaveBeenCalledWith(expect.objectContaining({
+      tool: 'edit',
+      command: 'apply_patch',
+      description: 'Write the new app entry',
+      subject: 'src/app.ts',
+    }));
+    expect(events.at(-1)).toMatchObject({
+      type: 'done',
+      status: 'completed',
+      output: 'edited',
+      usage: { inputTokens: 120, outputTokens: 30, cachedReadTokens: 40, totalTokens: 150 },
     });
   });
 

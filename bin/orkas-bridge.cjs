@@ -14,6 +14,8 @@
  *   chat_history                             → bridge socket (current chat only)
  *   cross_session_memory                     → bridge socket (calling Agent only)
  *   orkas_handoff_to_commander               → bridge socket (run-local signal)
+ *   orkas_dispatch_to_agent                  → bridge socket (Commander ACP:
+ *                                              real host Agent run + result)
  *
  * The host injects ORKAS_BRIDGE_CAPABILITIES. A category outside that
  * allowlist is not registered in MCP discovery at all.
@@ -555,6 +557,30 @@ function createServer() {
           return textResult(result.accepted
             ? 'Handoff recorded. Include any final evidence in your response and end this turn.'
             : 'A Commander handoff was already recorded for this run. End this turn without retrying.');
+        } catch (err) { return errorResult(err); }
+      },
+    ));
+  }
+
+  if (hasCapability('commander.dispatch')) {
+    server.registerTool('orkas_dispatch_to_agent', ...bridgeToolInput(
+      z,
+      'Run one named OrkaS agent in the host and return its settled result. Workspace file edits remain your own native-tool work; use this only for real delegation to another agent, and never claim a dispatch you did not make.',
+      {
+        to: z.string().min(1).max(200).describe('Target agent name or agent_id in this conversation. Commander and user aliases are invalid.'),
+        message: z.string().min(1).max(12000).describe('Execution contract sent verbatim: action, expected result, acceptance criteria, and new constraints.'),
+        resume: z.string().max(6000).optional().describe('Optional: what to do after this agent stops for user input and completes.'),
+      },
+      async ({ to, message, resume }) => {
+        try {
+          const result = await rpc('commander.dispatch', { to, message, resume: resume || '' });
+          if (!result || result.ok !== true) {
+            const response = textResult(JSON.stringify(result || { ok: false, error: 'dispatch failed' }));
+            response.isError = true;
+            return response;
+          }
+          const header = `Dispatch result from @${to}${result.task_id ? ` (task ${result.task_id})` : ''}:`;
+          return textResult(`${header}\n\n${result.result || ''}`);
         } catch (err) { return errorResult(err); }
       },
     ));

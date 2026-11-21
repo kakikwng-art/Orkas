@@ -55,6 +55,7 @@ import {
 import { getSession as _getCachedSession } from './session-store';
 import { app } from 'electron';
 import { randomUUID } from 'node:crypto';
+import { saveTokenUsage } from '../../features/token_usage';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as paths from '../../paths';
@@ -1695,6 +1696,8 @@ export async function* streamChatWithModel(opts: ChatOptions): AsyncGenerator<St
     systemPrompt,
     agentName,
     workingDir,
+    providerWorkingDir,
+    commanderBridge,
     images,
     attachmentMetadata,
     historyResources,
@@ -2029,6 +2032,9 @@ export async function* streamChatWithModel(opts: ChatOptions): AsyncGenerator<St
       ...(attachmentMetadata ? { attachmentMetadata } : {}),
       ...(opts.requireImageInput ? { requireImageInput: true } : {}),
       ...(projectId ? { projectId } : {}),
+      ...(workingDir ? { workingDir } : {}),
+      ...(providerWorkingDir ? { providerWorkingDir } : {}),
+      ...(commanderBridge ? { commanderBridge } : {}),
       ...(skillList !== undefined ? { skillList } : {}),
       ...(systemSkillList !== undefined ? { systemSkillList: [...systemSkillList] } : {}),
       ...(toolList !== undefined ? { toolList } : {}),
@@ -2068,6 +2074,42 @@ export async function* streamChatWithModel(opts: ChatOptions): AsyncGenerator<St
       // is always live by then.
       onCandidateChosen: (info) => {
         recorder.setActiveCandidate(info);
+      },
+      onProviderAttemptSettled: (info) => {
+        // The rotating provider reports every concrete upstream invocation,
+        // including discarded retries/fallback candidates and tool-loop calls.
+        // Accounting failure is non-fatal to the user's model run.
+        try {
+          saveTokenUsage(userId, {
+            eventId: `core:${sessionId}:${String(turnId ?? 'turn')}:${runStartedAt}:${info.attemptIndex}`,
+            startedAt: info.startedAt,
+            finishedAt: info.finishedAt,
+            provider: info.providerId,
+            model: info.modelId,
+            source: 'core',
+            callType: 'provider',
+            status: info.status,
+            usage: info.usage,
+            projectId: projectId ?? null,
+            taskId: historyBoundaryMessageId ?? null,
+            conversationId: cid ?? null,
+            sessionId,
+            turnId: turnId ?? null,
+            agentId: agentId ?? null,
+            actorId: agentId ?? null,
+            callId: `${sessionId}:${String(turnId ?? runStartedAt)}:${info.attemptIndex}`,
+            parentRequestId: historyBoundaryMessageId || `${sessionId}:${String(turnId ?? runStartedAt)}`,
+            attemptIndex: info.attemptIndex,
+            candidateIndex: info.candidateIndex,
+            profileId: info.profileId,
+          });
+        } catch (err) {
+          log.warn('token usage ledger write failed', {
+            session_id: turnLogContext.session_id,
+            turn_id: turnLogContext.turn_id,
+            error: logErrorSummary(err),
+          });
+        }
       },
       onRequestFailure: (failure) => {
         recordProviderRequestFailure(diagnostics.providerRequestFailures, failure);

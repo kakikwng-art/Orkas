@@ -113,6 +113,10 @@ export const NODE_NPM_GLOBAL_BIN_DIR = process.platform === 'win32'
 export const userRoot       = (uid: string) => path.join(WS_ROOT, uid);
 export const userCloudRoot  = (uid: string) => path.join(userRoot(uid), 'cloud');
 export const userLocalRoot  = (uid: string) => path.join(userRoot(uid), 'local');
+// Machine-private token accounting. Usage rows can contain provider/runtime
+// identifiers and must remain independent from both cloud sync and other apps.
+export const userTokenUsageDir = (uid: string) => path.join(userLocalRoot(uid), 'token-usage');
+export const userTokenUsageDbPath = (uid: string) => path.join(userTokenUsageDir(uid), 'token-usage.db');
 // ── Cloud-synced per-user ────────────────────────────────────────────────
 export const userChatsDir           = (uid: string) => path.join(userCloudRoot(uid), 'chats');
 export const userSkillChatDir       = (uid: string, sid: string) => path.join(userChatsDir(uid), 'skill', sid);
