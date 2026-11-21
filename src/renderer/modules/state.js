@@ -357,6 +357,7 @@ function bindStaticHandlers() {
   document.getElementById('new-chat-btn').addEventListener('click', () => _setViewFromSidebar('new-chat'));
   document.getElementById('todos-btn')?.addEventListener('click', () => _setViewFromSidebar('todos'));
   document.getElementById('auto-btn')?.addEventListener('click', () => _setViewFromSidebar('auto'));
+  document.getElementById('token-dashboard-btn')?.addEventListener('click', () => _setViewFromSidebar('token-dashboard'));
   document.getElementById('agents-btn').addEventListener('click', () => _setViewFromSidebar('agents'));
   document.getElementById('skills-btn').addEventListener('click', () => _setViewFromSidebar('skills'));
   document.getElementById('connectors-btn')?.addEventListener('click', () => _setViewFromSidebar('connectors'));

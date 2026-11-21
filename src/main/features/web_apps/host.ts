@@ -60,9 +60,9 @@ export const runtime = new WebAppRuntime({
     const r = await dialog.showSaveDialog({ title: t('web_apps.save'), defaultPath: name });
     return r.canceled ? null : r.filePath || null;
   }),
-  generate: async (uid, args, signal, progress) => {
+  generate: async (uid, args, signal, progress, identity) => {
     const { generateWebAppText } = await import('../../model/core-agent/runner');
-    return generateWebAppText(uid, args, signal, progress);
+    return generateWebAppText(uid, args, signal, progress, identity);
   },
   tools: appTools,
 });

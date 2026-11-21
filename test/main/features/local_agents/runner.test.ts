@@ -116,6 +116,10 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  try {
+    const usage = await import('../../../../src/main/features/token_usage');
+    usage.closeTokenUsageDatabases();
+  } catch { /* ledger may not have loaded */ }
   process.env.ORKAS_WORKSPACE_ROOT = prevWs;
   fs.rmSync(tmpDir, { recursive: true, force: true });
 });
@@ -646,14 +650,19 @@ describe('local_agents/runner', () => {
       attemptedVersions.push(cliVersion);
       deadlines.push(deadlineAt);
       if (binPath === firstBin) {
+        onEvent({ type: 'status', status: 'usage', usage: { input: 6, output: 4 } });
+        onEvent({ type: 'status', status: 'usage', usage: { input: 6, output: 4 } });
         onEvent({
           type: 'done', status: 'failed', error: 'unsupported initialize',
           failureKind: 'cli_protocol', retrySafe: true,
+          usage: { input: 6, output: 4 },
         });
         return;
       }
       onEvent({ type: 'text-delta', text: 'fallback worked' });
-      onEvent({ type: 'done', status: 'completed', output: 'fallback worked' });
+      onEvent({ type: 'status', status: 'usage', usage: { input: 12, output: 8 } });
+      onEvent({ type: 'done', status: 'completed', output: 'fallback worked',
+        usage: { input: 12, output: 8 } });
     };
     const previousBridgeDisabled = process.env.ORKAS_BRIDGE_DISABLED;
     process.env.ORKAS_BRIDGE_DISABLED = '1';
@@ -661,7 +670,7 @@ describe('local_agents/runner', () => {
       const runner = await loadRunner();
       const events: any[] = [];
       const result = await runner.run({
-        uid: TEST_UID, cid: 'c-fallback', agentId: 'agent-x',
+        uid: TEST_UID, cid: 'c-fallback', agentId: 'agent-x', currentMessageId: 'task-message-1',
         deadlineAt: originalDeadline,
         cli: 'codex', prompt: 'do work', cwd: tmpDir,
         signal: new AbortController().signal,
@@ -690,6 +699,18 @@ describe('local_agents/runner', () => {
         tmpDir, TEST_UID, 'local', 'file_cache', 'local-agent-runs', result.runId, 'meta.json',
       ), 'utf8'));
       expect(meta.cliPath).toBe(fallbackBin);
+      const usage = await import('../../../../src/main/features/token_usage');
+      const ledgerRows = usage.listTokenUsage(TEST_UID, { runId: result.runId });
+      expect(ledgerRows).toHaveLength(2);
+      expect(ledgerRows.map(row => ({ status: row.status, usage: row.usage_status, total: row.total_tokens,
+        attempt: row.attempt_index, run: row.run_id })))
+        .toEqual([
+          { status: 'completed', usage: 'known', total: 20, attempt: 2, run: result.runId },
+          { status: 'failed', usage: 'known', total: 10, attempt: 1, run: result.runId },
+        ]);
+      expect(usage.summarizeTokenUsage(TEST_UID, { runId: result.runId })).toMatchObject({
+        calls: 2, cli_attempts: 2, cli_runs: 1, total_tokens: 30,
+      });
     } finally {
       if (previousBridgeDisabled === undefined) delete process.env.ORKAS_BRIDGE_DISABLED;
       else process.env.ORKAS_BRIDGE_DISABLED = previousBridgeDisabled;
@@ -2124,6 +2145,13 @@ describe('local_agents/runner', () => {
       tmpDir, TEST_UID, 'local', 'file_cache', 'local-agent-runs', result.runId, 'meta.json',
     ), 'utf8'));
     expect(meta.status).toBe('cancelled');
+    const usage = await import('../../../../src/main/features/token_usage');
+    expect(usage.listTokenUsage(TEST_UID, { runId: result.runId })).toEqual([
+      expect.objectContaining({
+        provider: 'claude', status: 'cancelled', usage_status: 'unknown',
+        total_tokens: null, attempt_index: 1, run_id: result.runId,
+      }),
+    ]);
   });
 
   it('preserves the background timeout phase for localized caller recovery', async () => {

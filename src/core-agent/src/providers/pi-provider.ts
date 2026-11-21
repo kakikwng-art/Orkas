@@ -528,6 +528,7 @@ function mapUsage(u: PiAssistantMessage["usage"]): Usage {
     outputTokens: u.output,
     cacheReadTokens: u.cacheRead || undefined,
     cacheWriteTokens: u.cacheWrite || undefined,
+    reasoningTokens: u.reasoning || undefined,
     totalTokens: u.totalTokens,
   };
 }

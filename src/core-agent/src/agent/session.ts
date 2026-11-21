@@ -3604,6 +3604,7 @@ export function mergeUsage(a: Usage, b: Partial<Usage>): Usage {
     outputTokens: a.outputTokens + (b.outputTokens ?? 0),
     cacheReadTokens: (a.cacheReadTokens ?? 0) + (b.cacheReadTokens ?? 0),
     cacheWriteTokens: (a.cacheWriteTokens ?? 0) + (b.cacheWriteTokens ?? 0),
+    reasoningTokens: (a.reasoningTokens ?? 0) + (b.reasoningTokens ?? 0),
     totalTokens: a.totalTokens + (b.totalTokens ?? 0),
   };
 }

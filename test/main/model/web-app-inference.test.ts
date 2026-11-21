@@ -22,14 +22,20 @@ beforeEach(async () => {
   const p=await auth.addApiKey('openrouter','sk-local-fixture','Fixture');
   await auth.addEntry({provider:'openrouter',model:'openrouter/auto',profileId:p.profileId});
 });
-afterEach(async()=>{vi.doUnmock('#core-agent');if(previous===undefined)delete process.env.ORKAS_WORKSPACE_ROOT;else process.env.ORKAS_WORKSPACE_ROOT=previous;await fs.rm(root,{recursive:true,force:true});});
+afterEach(async()=>{vi.doUnmock('#core-agent');try{(await import('../../../src/main/features/token_usage')).closeTokenUsageDatabases();}catch{}if(previous===undefined)delete process.env.ORKAS_WORKSPACE_ROOT;else process.env.ORKAS_WORKSPACE_ROOT=previous;await fs.rm(root,{recursive:true,force:true});});
 describe('Web app governed pure inference',()=>{
   it('uses only explicit input and preserves streaming usage without an Agent session',async()=>{
     const {generateWebAppText}=await import('../../../src/main/model/core-agent/runner'); const progress=vi.fn();
-    expect(await generateWebAppText('app-inference-owner',{prompt:'Greeting',maxTokens:128},new AbortController().signal,progress)).toEqual({text:'Hello',usage:{inputTokens:2,outputTokens:1,totalTokens:3},stopReason:'end_turn'});
+    expect(await generateWebAppText('app-inference-owner',{prompt:'Greeting',maxTokens:128},new AbortController().signal,progress,
+      {sessionId:'webapp-fixture',taskId:'request-1'})).toEqual({text:'Hello',usage:{inputTokens:2,outputTokens:1,totalTokens:3},stopReason:'end_turn'});
     expect(requests).toHaveLength(1);expect(requests[0]).toMatchObject({messages:[{role:'user',content:[{type:'text',text:'Greeting'}]}],tools:[],maxTokens:128});
     expect(requests[0].systemPrompt).toBeUndefined();expect(requests[0].sessionId).toBeUndefined();
     expect(progress).toHaveBeenCalledWith({type:'delta',text:'Hello'});
+    const usage=await import('../../../src/main/features/token_usage');
+    expect(usage.listTokenUsage('app-inference-owner')).toEqual([expect.objectContaining({
+      call_type:'web_app_generate',status:'completed',usage_status:'known',provider:'openrouter',
+      model:'openrouter/auto',session_id:'webapp-fixture',task_id:'request-1',total_tokens:3,
+    })]);
   });
   it('passes long input and caller output budgets through the existing model path', async () => {
     const {generateWebAppText}=await import('../../../src/main/model/core-agent/runner');
@@ -44,6 +50,8 @@ describe('Web app governed pure inference',()=>{
   it('does not retry a failed generation or rotate to spend through another configuration',async()=>{
     failing=true;const {generateWebAppText}=await import('../../../src/main/model/core-agent/runner');
     await expect(generateWebAppText('app-inference-owner',{prompt:'Greeting',maxTokens:128},new AbortController().signal,()=>{})).rejects.toThrow();expect(requests).toHaveLength(1);
+    const rows=(await import('../../../src/main/features/token_usage')).listTokenUsage('app-inference-owner');
+    expect(rows).toEqual([expect.objectContaining({call_type:'web_app_generate',status:'failed',usage_status:'unknown',total_tokens:null})]);
   });
   it('rejects foreign accounts and pre-cancelled calls before contacting a provider',async()=>{
     const {generateWebAppText}=await import('../../../src/main/model/core-agent/runner');const c=new AbortController();c.abort();

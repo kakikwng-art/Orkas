@@ -88,6 +88,7 @@ export {
 } from './media.js';
 import type { BridgeCapability, BridgeHandle, BridgeCallObservation, CommanderHandoffRequest } from './bridge.js';
 import { registerUserSwitchHook } from '../user-switch-hooks.js';
+import { CumulativeUsageAccumulator, saveTokenUsage } from '../token_usage.js';
 import {
   MAX_IMAGE_ATTACHMENT_BYTES,
   resolveAttachmentAbsPath,
@@ -1483,6 +1484,7 @@ export async function run(opts: RunCliAgentOpts): Promise<RunCliAgentResult> {
   let resendAttempted = false;
   let bootstrapRecoveryAttempted = false;
   let deferredDone: LocalEvent | null = null;
+  let cliAttemptIndex = 0;
   const setTerminal = (e: LocalEvent) => {
     terminal = {
       status: (e.status as RunCliAgentResult['status']) || 'failed',
@@ -2096,6 +2098,18 @@ export async function run(opts: RunCliAgentOpts): Promise<RunCliAgentResult> {
     resumeSessionId?: string;
     reuseSessionInstructions?: boolean;
   }) => {
+    const attemptIndex = ++cliAttemptIndex;
+    const attemptStartedAt = Date.now();
+    // A backend may emit several cumulative snapshots for one attempt. Keep
+    // this accumulator attempt-local: independent retries/fallbacks start from
+    // zero and their complete usage is summed by the run_id query.
+    const attemptUsage = new CumulativeUsageAccumulator();
+    const onAttemptEvent = (event: LocalEvent) => {
+      if ((opts.cli === 'codex' && event.type === 'status' && event.status === 'usage') || event.type === 'done') {
+        attemptUsage.delta(event.usage as any);
+      }
+      onEvent(event);
+    };
     try {
       const helpArgs = CLI_TASK_HELP_ARGS[opts.cli];
       const cliFlags = helpArgs && !opts.signal.aborted && Date.now() < deadlineAt
@@ -2174,7 +2188,7 @@ export async function run(opts: RunCliAgentOpts): Promise<RunCliAgentResult> {
         })),
         resumeSessionId: attempt.resumeSessionId,
         signal: opts.signal,
-        onEvent,
+        onEvent: onAttemptEvent,
         onActiveRunIngress: opts.onActiveRunIngress,
         onBackgroundRun: handle => {
           backgroundRunEntered = true;
@@ -2210,9 +2224,41 @@ export async function run(opts: RunCliAgentOpts): Promise<RunCliAgentResult> {
       const msg = (err as Error).message || String(err);
       log.error('local agent backend threw', { ...runLogContext, error: logErrorSummary(err) });
       if (!terminal) {
-        onEvent({ type: 'done', status: 'failed', error: msg });
+        onAttemptEvent({ type: 'done', status: 'failed', error: msg });
       }
     } finally {
+      try {
+        const status = terminal?.status === 'completed' ? 'completed'
+          : terminal?.status === 'cancelled' ? 'cancelled' : 'failed';
+        saveTokenUsage(opts.uid, {
+          eventId: `cli:${handle.runId}:${attemptIndex}`,
+          startedAt: attemptStartedAt,
+          finishedAt: Date.now(),
+          provider: opts.cli,
+          model: opts.modelOverride || 'unknown',
+          source: 'cli',
+          callType: 'cli',
+          status,
+          usage: attemptUsage.total(),
+          projectId: opts.projectId ?? null,
+          // A CLI dispatch is the finest task identity currently available at
+          // this boundary; no project task record is fabricated.
+          taskId: opts.currentMessageId,
+          conversationId: opts.cid,
+          sessionId: terminal?.sessionId || cliSessionId,
+          agentId: opts.agentId,
+          actorId: opts.agentId,
+          callId: `${handle.runId}:${attemptIndex}`,
+          parentRequestId: opts.currentMessageId,
+          attemptIndex,
+          runId: handle.runId,
+        });
+      } catch (err) {
+        log.warn('CLI token usage ledger write failed', {
+          ...runLogContext,
+          error: logErrorSummary(err),
+        });
+      }
       // Fail closed on every path. Backends also clear at their authoritative
       // terminal event so the UI updates promptly; this covers throws, process
       // crashes, and future adapters that forget the lifecycle callback.

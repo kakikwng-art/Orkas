@@ -56,6 +56,9 @@ type PlannerModel = (input: {
   userId: string;
   cid: string;
   turnId: string;
+  sessionId?: string;
+  projectId?: string;
+  triggerMessageId?: string;
   /** The rendered planning prompt (what the real model reads). */
   message: string;
   signal: AbortSignal;
@@ -80,6 +83,9 @@ export async function planUserDispatch(input: {
   uid: string;
   cid: string;
   turnId: string;
+  sessionId?: string;
+  projectId?: string;
+  triggerMessageId?: string;
   text: string;
   candidates: readonly PlannerCandidate[];
   recentHistory: string;
@@ -105,7 +111,9 @@ export async function planUserDispatch(input: {
     const model: PlannerModel = _modelForTest
       || (await import('../../model/core-agent/runner')).completeDispatchPlan;
     raw = await model({
-      userId: input.uid, cid: input.cid, turnId: input.turnId, message, signal,
+      userId: input.uid, cid: input.cid, turnId: input.turnId,
+      sessionId: input.sessionId, projectId: input.projectId,
+      triggerMessageId: input.triggerMessageId, message, signal,
       request: { text: input.text, candidates: input.candidates.map((c, i) => ({ ...c, key: keys[i] })) },
     });
   } catch (err) {

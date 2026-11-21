@@ -83,6 +83,7 @@ import {
 import { invokeHandlers as webAssistHandlers } from './web_assist';
 import { bindWebAssistConversation } from '../features/web_assist';
 import { invokeHandlers as memoryHandlers } from './memory';
+import { invokeHandlers as tokenUsageHandlers } from './token_usage';
 import { safeId, writeJson } from '../storage';
 import { publishApp } from '../features/web_apps/commercial-entry';
 import { createLogger, logFromRenderer } from '../logger';
@@ -3869,6 +3870,9 @@ const invokeHandlers: Record<string, InvokeHandler> = {
 
   // Cross-session memory UI — view/edit/import/export over features/memory.ts.
   ...memoryHandlers,
+
+  // Read-only usage ledger queries for the Token dashboard.
+  ...tokenUsageHandlers,
 };
 
 // ── Stream handlers ──────────────────────────────────────────────────────

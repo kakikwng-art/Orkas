@@ -374,6 +374,10 @@ describe('Web app capability journeys', () => {
     await expect(call(a.token, 'ai.generate', { prompt: 'Hello' })).resolves.toMatchObject({ text: 'Test' });
     await expect(call(a.token, 'ai.generate', { prompt: 'Again' })).resolves.toMatchObject({ text: 'Test' });
     expect(host.generate).toHaveBeenCalledTimes(2);
+    expect(host.generate).toHaveBeenNthCalledWith(1, uid, { prompt: 'Hello' }, expect.any(AbortSignal), expect.any(Function), {
+      sessionId: `webapp-${bundle().key}`,
+      taskId: 'q1',
+    });
     host.modelAvailable = () => false;
     await expect(call(a.token, 'ai.generate', { prompt: 'No model' })).rejects.toMatchObject({ code: 'E_UNAVAILABLE' });
     expect(host.generate).toHaveBeenCalledTimes(2);

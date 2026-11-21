@@ -74,6 +74,83 @@ const PARAMS: CompletionParams = {
   messages: [{ role: 'user', content: [{ type: 'text', text: 'ping' }] }],
 };
 
+describe('provider attempt accounting', () => {
+  it('reports retry and fallback as distinct actual calls with real ownership', async () => {
+    const observations: any[] = [];
+    const provider = createRotatingProvider({
+      providerId: 'test',
+      networkRetryAttempts: 1,
+      networkRetryDelayMs: () => 0,
+      onAttemptSettled: observation => observations.push(observation),
+      candidates: [
+        candidate('primary', { throwBefore: Object.assign(new Error('socket reset'), { code: 'ECONNRESET' }) }, 'alpha', 'model-a'),
+        candidate('fallback', { streamEvents: [
+          { type: 'text_delta', text: 'ok' } as any,
+          { type: 'message_end', content: [{ type: 'text', text: 'ok' }], stopReason: 'end_turn',
+            usage: { inputTokens: 7, outputTokens: 2, totalTokens: 9 }, model: 'model-b' } as any,
+        ] }, 'beta', 'model-b'),
+      ],
+    });
+
+    await collect(provider.stream(PARAMS));
+    expect(observations).toHaveLength(3);
+    expect(observations.map(row => [row.providerId, row.modelId, row.status])).toEqual([
+      ['alpha', 'model-a', 'failed'],
+      ['alpha', 'model-a', 'failed'],
+      ['beta', 'model-b', 'completed'],
+    ]);
+    expect(observations[2].usage).toMatchObject({ inputTokens: 7, outputTokens: 2, totalTokens: 9 });
+  });
+});
+
+describe('candidate-local request projection', () => {
+  it('applies a Grok-style projection only to that candidate and gives fallback the original context', async () => {
+    const seen: Array<{ provider: string; params: CompletionParams }> = [];
+    const original: CompletionParams = {
+      model: 'primary-model',
+      systemPrompt: 'full tool and agent prompt',
+      messages: [{ role: 'user', content: [{ type: 'text', text: 'current user text' }] }],
+    };
+    const provider = createRotatingProvider({
+      providerId: 'grok-build',
+      networkRetryAttempts: 0,
+      candidates: [
+        {
+          profileId: 'grok', providerId: 'grok-build', modelId: 'grok-model',
+          projectParams: params => ({ ...params, systemPrompt: 'slim Grok prompt' }),
+          build: async () => ({
+            ...fakeProvider('grok', {}),
+            async *stream(params: CompletionParams) {
+              seen.push({ provider: 'grok', params });
+              throw Object.assign(new Error('socket reset'), { code: 'ECONNRESET' });
+            },
+          }),
+        },
+        {
+          profileId: 'fallback', providerId: 'openai', modelId: 'fallback-model',
+          build: async () => ({
+            ...fakeProvider('fallback', {}),
+            async *stream(params: CompletionParams) {
+              seen.push({ provider: 'fallback', params });
+              yield { type: 'text_delta', text: 'ok' } as StreamEvent;
+              yield { type: 'message_end', content: [{ type: 'text', text: 'ok' }],
+                stopReason: 'end_turn', model: 'fallback-model' } as StreamEvent;
+            },
+          }),
+        },
+      ],
+    });
+
+    await collect(provider.stream(original));
+
+    expect(seen.map(row => row.provider)).toEqual(['grok', 'fallback']);
+    expect(seen[0].params.systemPrompt).toBe('slim Grok prompt');
+    expect(seen[1].params.systemPrompt).toBe(original.systemPrompt);
+    expect(seen[1].params.messages).toBe(original.messages);
+    expect(original.systemPrompt).toBe('full tool and agent prompt');
+  });
+});
+
 describe('recovery of actual upstream rejections', () => {
   it.each(['complete', 'stream'] as const)('leaves local context overflow to Runner without rotating or cooling down (%s)', async method => {
     _clearAll();

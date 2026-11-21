@@ -313,6 +313,7 @@ function _lazyFeaturePanel(view) {
     : view === 'project' ? 'panel-project'
     : view === 'todos' ? 'panel-todos'
     : view === 'auto' ? 'panel-auto'
+    : view === 'token-dashboard' ? 'panel-token-dashboard'
     : view === 'marketplace' ? 'panel-marketplace'
     : view === 'devtools' ? 'panel-devtools'
     : null;
@@ -416,6 +417,7 @@ function setView(view, cid, opts = {}) {
   document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
   const panelId = view === 'new-chat' ? 'panel-new-chat'
                 : view === 'auto' ? 'panel-auto'
+                : view === 'token-dashboard' ? 'panel-token-dashboard'
                 : view === 'agents' ? 'panel-agents'
                 : view === 'skills' ? 'panel-skills'
                 : view === 'connectors' ? 'panel-connectors'
@@ -432,6 +434,7 @@ function setView(view, cid, opts = {}) {
 
   document.getElementById('new-chat-btn').classList.toggle('active', view === 'new-chat');
   document.getElementById('auto-btn')?.classList.toggle('active', view === 'auto');
+  document.getElementById('token-dashboard-btn')?.classList.toggle('active', view === 'token-dashboard');
   document.getElementById('todos-btn')?.classList.toggle('active', view === 'todos');
   document.getElementById('agents-btn').classList.toggle('active', view === 'agents');
   document.getElementById('skills-btn').classList.toggle('active', view === 'skills');
@@ -450,6 +453,10 @@ function setView(view, cid, opts = {}) {
     _loadViewFeature('settings', 'memory', () => {
       if (typeof renderMemoryPage === 'function') renderMemoryPage();
     });
+  }
+
+  if (view === 'token-dashboard' && typeof onEnterTokenDashboard === 'function') {
+    onEnterTokenDashboard();
   }
 
   window.CliAsyncInput?.showConversation(view === 'conversation' ? cid : null);

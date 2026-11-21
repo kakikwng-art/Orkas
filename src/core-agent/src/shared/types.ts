@@ -106,6 +106,7 @@ export type Usage = {
   outputTokens: number;
   cacheReadTokens?: number;
   cacheWriteTokens?: number;
+  reasoningTokens?: number;
   totalTokens: number;
 };
 

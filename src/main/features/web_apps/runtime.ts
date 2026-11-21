@@ -57,7 +57,8 @@ export interface HostAdapters {
   closed?(uid: string, usage: AppUsageScope): void;
   pick(): Promise<string | null>;
   save(name: string): Promise<string | null>;
-  generate(uid: string, args: { prompt: string; maxTokens?: number }, signal: AbortSignal, progress: (event: unknown) => void): Promise<unknown>;
+  generate(uid: string, args: { prompt: string; maxTokens?: number }, signal: AbortSignal,
+    progress: (event: unknown) => void, identity: { sessionId: string; taskId: string }): Promise<unknown>;
   tools(uid: string, usage: AppUsageScope): Promise<AppTool[]>;
 }
 interface Instance {
@@ -392,7 +393,7 @@ export class WebAppRuntime {
     try {
       if (def.capability) this.requireCapability(s, def.capability);
       await this.check(s, signal);
-      const value = await this.execute(s, method as Method, parsed.data, signal, event => {
+      const value = await this.execute(s, requestId, method as Method, parsed.data, signal, event => {
         this.checkCurrent(s, signal); boundedJson(event, 64 * 1024); progress(event);
       });
       if (method !== 'permissions.revoke') await this.check(s, signal);
@@ -552,7 +553,7 @@ export class WebAppRuntime {
       return { saved: true };
     }); } finally { if (--lock.users === 0) this.stores.delete(root); }
   }
-  private async execute(s: Instance, method: Method, a: any, signal: AbortSignal, progress: (event: unknown) => void): Promise<any> {
+  private async execute(s: Instance, requestId: string, method: Method, a: any, signal: AbortSignal, progress: (event: unknown) => void): Promise<any> {
     if (method.startsWith('data.')) return this.dataCall(s,method,a,signal);
     if (method.startsWith('appFiles.')) return this.appFiles(s, method, a, signal);
     if (method.startsWith('storage.')) return this.store(s, method, a, signal);
@@ -612,7 +613,10 @@ export class WebAppRuntime {
       }
       case 'ai.generate': {
         if (!this.host.modelAvailable()) return error('E_UNAVAILABLE');
-        return this.host.generate(s.uid, a, signal, progress);
+        return this.host.generate(s.uid, a, signal, progress, {
+          sessionId: `webapp-${s.bundle.key}`,
+          taskId: requestId,
+        });
       }
       case 'tools.list': {
         if (this.preview) return { tools: [] };

@@ -30,6 +30,7 @@
         <!-- One flat list, in the release_1.8.0 order. -->
         <button class="sidebar-btn" id="todos-btn"><span data-ui-icon="clipboard-list" data-ui-icon-class="sidebar-btn-icon"></span><span data-i18n="project.todo.title">To-do</span></button>
         <button class="sidebar-btn" id="auto-btn"><span data-ui-icon="clock" data-ui-icon-class="sidebar-btn-icon"></span><span data-i18n="sidebar.auto">Auto</span></button>
+        <button class="sidebar-btn" id="token-dashboard-btn"><span data-ui-icon="chart-spline" data-ui-icon-class="sidebar-btn-icon"></span><span>Token ???</span></button>
         <button class="sidebar-btn" id="agents-btn"><span data-ui-icon="users" data-ui-icon-class="sidebar-btn-icon"></span><span data-i18n="sidebar.agents">Agents</span></button>
         <button class="sidebar-btn" id="skills-btn"><span data-ui-icon="sparkles" data-ui-icon-class="sidebar-btn-icon"></span><span data-i18n="sidebar.skills">Skills</span></button>
         <button class="sidebar-btn" id="connectors-btn"><span data-ui-icon="plug" data-ui-icon-class="sidebar-btn-icon"></span><span data-i18n="sidebar.connectors">Connectors</span></button>
@@ -1108,6 +1109,116 @@
         </div>
       </section>
 
+      <!-- Token dashboard ??read-only analytics over the local Token ledger. -->
+      <section class="panel" id="panel-token-dashboard">
+        <div class="token-dashboard-page">
+          <header class="token-dashboard-header">
+            <div>
+              <h1>Token ??????</h1>
+              <p id="token-period-label">??????</p>
+            </div>
+            <button class="btn btn-sm token-refresh-btn" id="token-refresh-btn" type="button" aria-label="??? Token ???">
+              <span data-ui-icon="refresh" aria-hidden="true"></span><span>???</span>
+            </button>
+          </header>
+
+          <div class="token-dashboard-scroll">
+            <section class="token-filter-card" aria-label="Token ??????">
+              <div class="token-preset-row" id="token-preset-row">
+                <button type="button" data-days="all" class="is-active">???</button>
+                <button type="button" data-days="7">7 ??/button>
+                <button type="button" data-days="30">30 ??/button>
+                <button type="button" data-days="90">90 ??/button>
+                <button type="button" data-days="custom">?????/button>
+              </div>
+              <div class="token-custom-range" id="token-custom-range" hidden>
+                <label>??input id="token-start-date" type="date"></label>
+                <label>??input id="token-end-date" type="date"></label>
+                <button class="btn btn-sm btn-primary" id="token-apply-range" type="button">???</button>
+              </div>
+              <div class="token-dimension-row">
+                <label><span>???</span><select id="token-model-filter"><option value="">??????</option></select></label>
+                <label><span>Provider</span><select id="token-provider-filter"><option value="">??? Provider</option></select></label>
+                <label><span>Agent</span><select id="token-agent-filter"><option value="">??? Agent</option></select></label>
+                <label><span>???</span><select id="token-project-filter"><option value="">??????</option></select></label>
+                <label><span>???</span><select id="token-task-filter"><option value="">??????</option></select></label>
+                <label><span>??????</span><select id="token-call-type-filter"><option value="">?????????</option></select></label>
+              </div>
+            </section>
+
+            <div class="token-notice is-visible" id="token-notice" role="status">?????? Token ?????/div>
+
+            <section class="token-hero-grid" aria-label="??????">
+              <article class="token-hero-card is-total">
+                <div class="token-metric-head"><span>??Token</span><span class="token-comparison-chip" id="token-period-change">??/span></div>
+                <strong id="token-total">??/strong>
+                <div class="token-hero-meta"><span>??? Provider ???</span><span id="token-known-calls">????? usage</span></div>
+              </article>
+              <article class="token-hero-card is-today">
+                <div class="token-metric-head"><span>??? Token</span><span class="token-hero-icon">??/span></div>
+                <strong id="token-today">??/strong>
+                <div class="token-hero-meta"><span>??????</span><span id="token-today-calls">???????/span></div>
+              </article>
+              <article class="token-hero-card is-calls">
+                <div class="token-metric-head"><span>????????/span><span class="token-hero-icon">??/span></div>
+                <strong id="token-call-count">??/strong>
+                <div class="token-hero-meta token-cli-meta"><span id="token-cli-runs">CLI ??? ??/span><span id="token-cli-attempts">attempt ??/span></div>
+              </article>
+            </section>
+
+            <section class="token-metric-grid" aria-label="Token ???????????>
+              <article><span class="token-metric-dot is-input"></span><div><small>???</small><strong id="token-input">??/strong></div></article>
+              <article><span class="token-metric-dot is-output"></span><div><small>???</small><strong id="token-output">??/strong></div></article>
+              <article><span class="token-metric-dot is-cache"></span><div><small>?????? / ???</small><strong id="token-cache">??/ ??/strong></div></article>
+              <article><span class="token-metric-dot is-reasoning"></span><div><small>???</small><strong id="token-reasoning">??/strong></div></article>
+              <article><span class="token-metric-dot is-quality"></span><div><small>usage ?????/small><strong id="token-coverage">??/strong><button id="token-unknown-calls" class="token-unknown-link" type="button">??? ????/button></div></article>
+            </section>
+
+            <section class="token-panel token-trend-panel">
+              <div class="token-panel-head">
+                <div><span class="token-eyebrow">DAILY USAGE</span><h2>??????</h2></div>
+                <div class="token-trend-actions">
+                  <span class="token-comparison-summary" id="token-comparison-summary">??? ??? ??? ??/span>
+                  <div class="token-trend-legend"><span><i class="is-total"></i>??Token</span><span><i class="is-input"></i>???</span><span><i class="is-output"></i>???</span></div>
+                </div>
+              </div>
+              <div class="token-chart-wrap" id="token-trend-chart" aria-label="??? Token ?????></div>
+              <div class="token-panel-hint">????????????????????????</div>
+            </section>
+
+            <section class="token-panel">
+              <div class="token-panel-head"><div><span class="token-eyebrow">WATCHLIST</span><h2>???????/h2></div><span class="token-count-badge" id="token-anomaly-count">0</span></div>
+              <div id="token-anomaly-list" class="token-anomaly-list"></div>
+            </section>
+
+            <section class="token-ranking-grid">
+              <article class="token-panel">
+                <div class="token-panel-head"><div><span class="token-eyebrow">MODELS</span><h2>??????</h2></div></div>
+                <div class="token-ranking-body"><div class="token-donut" id="token-model-donut"><div><strong>??/strong><span>tokens</span></div></div><div id="token-model-ranking" class="token-ranking-list"></div></div>
+              </article>
+              <article class="token-panel">
+                <div class="token-panel-head"><div><span class="token-eyebrow">PROVIDERS</span><h2>Provider ???</h2></div></div>
+                <div class="token-ranking-body"><div class="token-donut" id="token-provider-donut"><div><strong>??/strong><span>tokens</span></div></div><div id="token-provider-ranking" class="token-ranking-list"></div></div>
+              </article>
+            </section>
+
+            <details class="token-method-card">
+              <summary>???????????/summary>
+              <p>????????? Provider ?????total_tokens????????????????????rovider ????????????????????????????????LI ?????? attempt ??????????????????????????????/p>
+            </details>
+          </div>
+        </div>
+
+        <div class="token-detail-overlay" id="token-detail-overlay" aria-hidden="true">
+          <section class="token-detail-sheet" role="dialog" aria-modal="true" aria-labelledby="token-detail-title">
+            <div class="token-sheet-handle"></div>
+            <header><div><span id="token-detail-kicker">??????</span><h2 id="token-detail-title">??/h2></div><button id="token-detail-close" type="button" aria-label="???">?</button></header>
+            <div class="token-detail-summary" id="token-detail-summary"></div>
+            <div class="token-detail-list" id="token-detail-list"></div>
+          </section>
+        </div>
+      </section>
+
       <!-- Settings -->
       <section class="panel" id="panel-settings">
         <div class="settings-container">
@@ -2060,6 +2171,7 @@
   <script src="./modules/auto-title.js"></script>
   <script src="./modules/auto-events.js"></script>
   <script src="./modules/utils.js"></script>
+  <script src="./modules/token-dashboard.js"></script>
   <script src="./modules/validation-report-view.js"></script>
   <script src="./modules/oss.js"></script>
   <script src="./modules/settings_tabs.js"></script>

@@ -57,6 +57,7 @@ afterEach(async () => {
   vi.doUnmock('../../../src/main/model/core-agent/image-studio-tool');
   vi.doUnmock('../../../src/main/model/core-agent/connector-meta-tools');
   vi.doUnmock('../../../src/main/features/project_library_indexer');
+  try { (await import('../../../src/main/features/token_usage')).closeTokenUsageDatabases(); } catch { /* unopened */ }
   process.env.ORKAS_WORKSPACE_ROOT = prevWs;
   if (prevAnthropicKey === undefined) delete process.env.ANTHROPIC_API_KEY;
   else process.env.ANTHROPIC_API_KEY = prevAnthropicKey;
@@ -3598,6 +3599,7 @@ describe('runner › tools-free dispatch planning call', () => {
     await auth.addEntry({ provider: 'openrouter', model: 'future-lab/primary-model', profileId: profile.profileId });
     const { completeDispatchPlan } = await loadRunner();
     const input = { userId: 'dispatch-planner-owner', cid: 'planner-task', turnId: 'planner-turn',
+      sessionId: 'planner-session', projectId: 'planner-project', triggerMessageId: 'planner-message',
       message: 'Split this message into tasks.', signal: new AbortController().signal };
     return { complete, run: completeDispatchPlan, input };
   }
@@ -3621,6 +3623,14 @@ describe('runner › tools-free dispatch planning call', () => {
     expect(request.sessionId).toBeUndefined();
     expect(request.requestMetadata.creditContext).toEqual({ conversationId: input.cid, turnId: input.turnId });
     expect(meter.taskTokens(input.cid)).toBe(30);
+    const rows = (await import('../../../src/main/features/token_usage')).listTokenUsage(input.userId);
+    expect(rows).toEqual([expect.objectContaining({
+      call_type: 'dispatch_planner', provider: 'openrouter', model: 'future-lab/primary-model',
+      status: 'completed', usage_status: 'known', total_tokens: 30,
+      project_id: input.projectId, task_id: input.triggerMessageId,
+      conversation_id: input.cid, session_id: input.sessionId,
+      turn_id: input.turnId, agent_id: 'commander', actor_id: 'commander',
+    })]);
     await expect(run({ ...input, userId: 'another-account' })).rejects.toThrow('cancelled');
     await expect(run({ ...input, message: 'x'.repeat(64_001) })).rejects.toThrow('input limit');
     const controller = new AbortController(); controller.abort();
@@ -3657,6 +3667,8 @@ describe('runner › bounded Skill creation correction', () => {
     await auth.addEntry({ provider: 'openrouter', model: 'future-lab/test-model', profileId: profile.profileId });
     const { completeSkillCreationCorrection } = await loadRunner();
     const input = { userId: 'skill-correction-owner', cid: 'correction-task', turnId: 'correction-turn',
+      sessionId: 'correction-session', agentId: 'commander', projectId: 'correction-project',
+      triggerMessageId: 'correction-message',
       message: 'Repair only the supplied proposal.', signal: new AbortController().signal };
     return { complete, run: completeSkillCreationCorrection, input };
   }
@@ -3677,6 +3689,14 @@ describe('runner › bounded Skill creation correction', () => {
     expect(request.systemPrompt).toBeUndefined();
     expect(request.requestMetadata.creditContext).toEqual({ conversationId: input.cid, turnId: input.turnId });
     expect(meter.taskTokens(input.cid)).toBe(30);
+    const rows = (await import('../../../src/main/features/token_usage')).listTokenUsage(input.userId);
+    expect(rows).toEqual([expect.objectContaining({
+      call_type: 'skill_correction', provider: 'openrouter', model: 'future-lab/test-model',
+      status: 'completed', usage_status: 'known', total_tokens: 30,
+      project_id: input.projectId, task_id: input.triggerMessageId,
+      conversation_id: input.cid, session_id: input.sessionId,
+      turn_id: input.turnId, agent_id: input.agentId, actor_id: input.agentId,
+    })]);
     await expect(run({ ...input, userId: 'another-account' })).rejects.toThrow('cancelled');
     await expect(run({ ...input, message: 'x'.repeat(64_001) })).rejects.toThrow('input limit');
     const controller = new AbortController(); controller.abort();

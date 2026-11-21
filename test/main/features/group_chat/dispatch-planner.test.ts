@@ -118,12 +118,17 @@ describe('dispatch planner › planUserDispatch', () => {
     { id: 'agent-b', name: 'Reviewer', description: 'Reviews drafts', isCommander: false, mentioned: true },
     { id: 'commander', name: '指挥官', description: 'Orchestrator', isCommander: true, mentioned: false },
   ];
-  const base = { uid: 'u1', cid: 'c1', turnId: 't1', text: '@Writer 写初稿，然后 @Reviewer 审一下', candidates, recentHistory: '' };
+  const base = { uid: 'u1', cid: 'c1', turnId: 't1', sessionId: 'planner-session',
+    projectId: 'project-1', triggerMessageId: 'message-1',
+    text: '@Writer 写初稿，然后 @Reviewer 审一下', candidates, recentHistory: '' };
 
   it('renders the prompt with keyed candidates and the user message, then validates the reply', async () => {
     let seen = '';
-    _setDispatchPlannerModelForTest(async ({ message, request }) => {
+    _setDispatchPlannerModelForTest(async ({ message, request, sessionId, projectId, triggerMessageId }) => {
       seen = message;
+      expect({ sessionId, projectId, triggerMessageId }).toEqual({
+        sessionId: base.sessionId, projectId: base.projectId, triggerMessageId: base.triggerMessageId,
+      });
       expect(request?.candidates.map((c) => c.key)).toEqual(['a1', 'a2', 'commander']);
       return plan([
         { key: 't1', assignee: 'a1', part: '写初稿' },

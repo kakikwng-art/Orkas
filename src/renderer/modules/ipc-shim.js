@@ -90,6 +90,7 @@ const _IPC_ROUTES = [
   ['DELETE', /^\/api\/conversations\/([^/]+)$/,            'conversations.delete',       ['cid']],
   ['POST',   /^\/api\/conversations\/([^/]+)\/pin$/,       'conversations.pin',          ['cid']],
   ['POST',   /^\/api\/conversations\/([^/]+)\/rename$/,    'conversations.rename',       ['cid']],
+  ['POST',   /^\/api\/conversations\/([^/]+)\/export-json$/, 'conversations.exportJson',  ['cid']],
   ['POST',   /^\/api\/conversations\/([^/]+)\/move$/,      'conversations.move',         ['cid']],
   ['GET',    /^\/api\/conversations\/([^/]+)\/history$/,   'conversations.history',      ['cid']],
   ['GET',    /^\/api\/conversations\/([^/]+)\/process$/,   'conversations.processPage',  ['cid']],
