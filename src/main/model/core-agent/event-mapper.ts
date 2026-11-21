@@ -275,6 +275,22 @@ function resultPreview(s: string, max = 300): string {
   return oneLine.length > max ? oneLine.slice(0, max) + '…' : oneLine;
 }
 
+/** Bound the argument body attached to a tool's terminal event. The start
+ *  event already persisted the same input; this copy exists only for the
+ *  result expansion, so it must not duplicate a large write payload. */
+const TOOL_ARGUMENT_DETAIL_MAX = 4000;
+function boundedToolArguments(value: unknown): unknown {
+  if (value === undefined || value === null) return value;
+  if (typeof value === 'string') {
+    return value.length > TOOL_ARGUMENT_DETAIL_MAX ? `${value.slice(0, TOOL_ARGUMENT_DETAIL_MAX)}…` : value;
+  }
+  let text: string;
+  try { text = JSON.stringify(value); } catch { return undefined; }
+  return typeof text === 'string' && text.length > TOOL_ARGUMENT_DETAIL_MAX
+    ? `${text.slice(0, TOOL_ARGUMENT_DETAIL_MAX)}…`
+    : value;
+}
+
 /**
  * When `util/tool-result-cap.ts` spills an oversized in-process tool
  * result to disk, it rewrites `result.content` into a
@@ -780,6 +796,7 @@ export async function* mapCoreAgentEvents(
   const earlyToolStarts = new Set<string>();
   const toolDeltaNames = new Map<string, string>();
   const toolLifecycleStartedAt = new Map<string, number>();
+  const toolInputById = new Map<string, unknown>();
   const nowMs = opts.nowMs ?? (() => performance.now());
   const failureTracking = modelFailureTrackingState(opts.failureTrackingScope);
   let thinkingSequence = 0;
@@ -1063,6 +1080,7 @@ export async function* mapCoreAgentEvents(
         // actually available rather than manufacturing model-wait time.
         if (!toolLifecycleStartedAt.has(ev.id)) toolLifecycleStartedAt.set(ev.id, nowMs());
         toolDeltaNames.delete(ev.id);
+        if (ev.input !== undefined) toolInputById.set(ev.id, ev.input);
         const skillMeta = skillReadMetadataForToolStart(ev.name, ev.input, opts);
         if (skillMeta) skillReadByToolId.set(ev.id, skillMeta);
         // Persist UI identity separately from agent.json read metadata so
@@ -1146,6 +1164,8 @@ export async function* mapCoreAgentEvents(
           : Math.max(observedEndToEndMs, executionDurationMs ?? 0);
         earlyToolStarts.delete(ev.id);
         toolDeltaNames.delete(ev.id);
+        const toolInput = toolInputById.get(ev.id);
+        toolInputById.delete(ev.id);
         const skillMeta = skillReadByToolId.get(ev.id) || null;
         skillReadByToolId.delete(ev.id);
         const agentMeta = agentReadByToolId.get(ev.id) || null;
@@ -1174,6 +1194,7 @@ export async function* mapCoreAgentEvents(
           name: ev.name,
           isError: !!ev.isError,
           result_preview: preview,
+          ...(toolInput !== undefined ? { arguments: boundedToolArguments(toolInput) } : {}),
           ...(ev.displayName ? { display_name: ev.displayName } : {}),
           ...(executionDurationMs !== null ? { duration_ms: executionDurationMs } : {}),
           ...(endToEndDurationMs !== null ? { end_to_end_duration_ms: endToEndDurationMs } : {}),

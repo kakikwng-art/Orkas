@@ -477,6 +477,36 @@ async function *streamGrokCommanderAcp(
   const notify = () => { const fn = wake; wake = null; fn?.(); };
   const push = (event: StreamEvent) => { events.push(event); notify(); };
 
+  // ACP carries tool execution this process does not own: the CLI runs the
+  // call and reports the lifecycle. Track open rows so a result always
+  // addresses the same call id, and so a turn that dies mid-tool does not
+  // leave a permanently "running" row behind.
+  const openTools = new Map<string, { name: string; output?: string }>();
+  let thinkingOpen = false;
+  const startThinking = () => {
+    if (thinkingOpen) return;
+    thinkingOpen = true;
+    push({ type: 'thinking_start' });
+  };
+  const endThinking = () => {
+    if (!thinkingOpen) return;
+    thinkingOpen = false;
+    push({ type: 'thinking_end' });
+  };
+  const closeOpenTools = (isError: boolean) => {
+    if (!openTools.size) return;
+    for (const [id, tool] of openTools) {
+      push({
+        type: 'tool_result',
+        id,
+        name: tool.name,
+        ...(tool.output ? { output: tool.output } : {}),
+        ...(isError ? { isError: true } : {}),
+      });
+    }
+    openTools.clear();
+  };
+
   const running = grokBackend.run({
     binPath,
     cwd,
@@ -493,13 +523,80 @@ async function *streamGrokCommanderAcp(
       },
     } : {}),
     onEvent: (event) => {
+      if (event.type === 'thinking') {
+        // ACP thought chunks are the CLI's real reasoning text. They are
+        // forwarded as reasoning activity only; nothing is synthesized when
+        // the CLI emits no thought stream.
+        const text = typeof event.text === 'string' ? event.text : '';
+        if (!text) return;
+        startThinking();
+        push({ type: 'thinking_delta', chars: text.length, text });
+        return;
+      }
+      if (event.type === 'tool-event') {
+        endThinking();
+        const id = typeof event.callId === 'string' ? event.callId.trim() : '';
+        if (!id) return;
+        const name = typeof event.tool === 'string' && event.tool.trim() ? event.tool.trim() : 'tool';
+        const toolStatus = typeof event.status === 'string' ? event.status.trim().toLowerCase() : '';
+        if (event.phase === 'use') {
+          if (openTools.has(id)) return;
+          openTools.set(id, { name });
+          push({
+            type: 'tool_call',
+            id,
+            name,
+            ...(event.input !== undefined ? { input: event.input } : {}),
+          });
+          return;
+        }
+        if (event.phase !== 'result') return;
+        const opened = openTools.get(id);
+        // ACP `tool_call_update` without a status is an in-place update, not a
+        // completion: Grok sends the human title/description that way before
+        // the terminal `completed` update that carries the real output. Closing
+        // on it produced a duplicate row with ~0ms and the description as the
+        // result.
+        if (!toolStatus) {
+          if (opened) {
+            if (typeof event.output === 'string' && event.output) opened.output = event.output;
+            return;
+          }
+          // A server that reports no start at all still needs a visible row.
+          openTools.set(id, { name, ...(typeof event.output === 'string' && event.output ? { output: event.output } : {}) });
+          push({ type: 'tool_call', id, name, ...(event.input !== undefined ? { input: event.input } : {}) });
+          return;
+        }
+        if (toolStatus !== 'completed' && toolStatus !== 'failed' && toolStatus !== 'cancelled') return;
+        const failed = event.isError === true || toolStatus === 'failed' || toolStatus === 'cancelled';
+        // ACP terminal updates commonly omit the title, so the row keeps the
+        // name that opened the call instead of degrading to a generic label.
+        if (!opened) {
+          openTools.set(id, { name });
+          push({ type: 'tool_call', id, name });
+        }
+        openTools.delete(id);
+        push({
+          type: 'tool_result',
+          id,
+          name: opened?.name || name,
+          output: typeof event.output === 'string' && event.output
+            ? event.output
+            : opened?.output || '',
+          ...(failed ? { isError: true } : {}),
+        });
+        return;
+      }
       if (event.type === 'text-delta' && typeof event.text === 'string' && event.text) {
+        endThinking();
         fullText += event.text;
         push({ type: 'text_delta', text: event.text });
         return;
       }
       if (event.type !== 'done') return;
+      endThinking();
       const doneStatus = String(event.status || 'completed');
+      closeOpenTools(doneStatus !== 'completed');
       if (event.usage) usage = usageFrom(event.usage);
       // Some ACP servers only expose the final answer on the terminal event
       // instead of streaming agent_message_chunk deltas.

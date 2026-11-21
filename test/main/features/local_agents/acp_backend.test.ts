@@ -1025,13 +1025,14 @@ require('node:readline').createInterface({input:process.stdin}).on('line',line=>
 });
 
 describe('ACP optional configuration compatibility', () => {
-  it.each(['supported', 'rejected', 'missing-effort', 'missing-id', 'malformed-ack', 'null-ack-option'])('selects the advertised config-option interface: %s', async mode => {
+  it.each(['supported', 'stale-catalog', 'rejected', 'missing-effort', 'missing-id', 'malformed-ack', 'null-ack-option'])('selects the advertised config-option interface: %s', async mode => {
     const server = String.raw`
 const rl = require('node:readline').createInterface({ input: process.stdin });
 const mode = process.argv[1]; const methods = []; const selected = {};
 const options = () => [
   { id: mode === 'missing-id' ? undefined : 'provider-model', category: 'model', type: 'select', currentValue: selected['provider-model'] || 'default',
-    options: [{ group: 'provider', options: [{ value: 'chosen' }] }] },
+    options: [{ group: 'provider', options: mode === 'stale-catalog' && !selected['provider-model']
+      ? [{ value: 'provisional-only' }] : [{ value: 'chosen' }] }] },
   ...(mode === 'missing-effort' ? [] : [{ id: 'reasoning', category: 'thought_level', type: 'select',
     currentValue: selected.reasoning || 'low', options: [{ value: 'high' }, { value: 'low' }] }]),
 ];
@@ -1061,10 +1062,10 @@ rl.on('line', line => {
     await backend.run({ binPath: TEST_NODE, prompt: 'controlled fixture', modelOverride: 'chosen', thinkingLevel: 'high',
       cwd: process.cwd(), signal: new AbortController().signal, timeoutMs: 5000, onEvent: event => events.push(event) });
     const done = events.filter(event => event.type === 'done'); expect(done).toHaveLength(1);
-    if (mode === 'supported' || mode === 'missing-effort') {
+    if (mode === 'supported' || mode === 'stale-catalog' || mode === 'missing-effort') {
       expect(done[0].status).toBe('completed');
       expect(JSON.parse(done[0].output)).toEqual(['initialize', 'session/new', 'session/set_config_option',
-        ...(mode === 'supported' ? ['session/set_config_option'] : []), 'session/prompt']);
+        ...(mode === 'missing-effort' ? [] : ['session/set_config_option']), 'session/prompt']);
     } else {
       expect(done[0]).toMatchObject({ status: 'failed', cliError: 'parameter_unsupported', retrySafe: false });
       expect(events.filter(event => event.type === 'text-delta')).toEqual([]);

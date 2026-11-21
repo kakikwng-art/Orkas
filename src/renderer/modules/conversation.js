@@ -313,6 +313,7 @@ function _processInputPaths(input) {
   };
   const directKeys = [
     'path', 'file_path', 'filePath', 'filename', 'file',
+    'target_file', 'targetFile', 'target_directory', 'targetDirectory',
     'displayPath',
     'output_path', 'outputPath', 'input_path', 'inputPath',
     'source_path', 'sourcePath', 'notebook_path', 'notebookPath',
@@ -760,7 +761,7 @@ function _processToolPresentation(name, data, input) {
   if (['read', 'read_file', 'read_files', 'office_read'].includes(key)) {
     return { actionKey: _processResourceAction(resource, 'read'), target };
   }
-  if (key === 'list_files') {
+  if (key === 'list_files' || key === 'list_dir') {
     const resourceScope = String(data?.resource_scope || data?.resourceScope || '').trim();
     return {
       actionKey: 'chat.process.action_view_directory',
@@ -868,7 +869,7 @@ function _processToolPresentation(name, data, input) {
   }
   if ([
     'bash', 'exec_command', 'commandexecution', 'command_execution',
-    'shell', 'terminal', 'execute',
+    'shell', 'terminal', 'execute', 'run_terminal_command',
     'process_session', 'interactive_cli',
     'process_start', 'process_read', 'process_write', 'process_stop',
     'interactive_cli_start', 'interactive_cli_read', 'interactive_cli_send', 'interactive_cli_close',
@@ -16934,6 +16935,22 @@ function _formatEventLine(evt, displayContext) {
   return null;
 }
 
+// Bounded, readable rendering of a tool call's arguments for the result
+// expansion. Unknown shapes fall back to String() rather than dropping the
+// detail entirely.
+function _processToolArgumentsDetail(value) {
+  if (value === undefined || value === null || value === '') return '';
+  let text = '';
+  try {
+    text = typeof value === 'string' ? value : JSON.stringify(value, null, 2);
+  } catch (_) {
+    text = String(value);
+  }
+  if (typeof text !== 'string' || !text.trim()) return '';
+  const MAX = 2000;
+  return text.length > MAX ? `${text.slice(0, MAX)}\n…` : text;
+}
+
 // One projection owns the facts that identify a visible process row. Live
 // streams and restored history both consume this shape, so formatting changes
 // cannot accidentally omit lifecycle identity, semantic kind, or result
@@ -16960,8 +16977,17 @@ function _projectProcessRow(evt, displayContext, fallbackText = '') {
     ? (typeof data.outputPath === 'string' ? data.outputPath : '')
     : (toolResult && typeof data.result_path === 'string' ? data.result_path : '');
   const resultRef = cliResult && typeof data.outputRef === 'string' ? data.outputRef : '';
-  const fullOutput = (cliResult || toolResult) && typeof data.output === 'string'
+  const resultText = (cliResult || toolResult) && typeof data.output === 'string'
     ? data.output
+    : '';
+  // Tool expansion carries both halves the run reported: the call's arguments
+  // (when the runtime exposed them) and its output. Without the arguments a
+  // bare output is often unreadable for read/edit/exec calls.
+  const argumentText = (cliResult || toolResult) && data.arguments !== undefined
+    ? _processToolArgumentsDetail(data.arguments)
+    : '';
+  const fullOutput = argumentText || resultText
+    ? [argumentText, resultText].filter(Boolean).join('\n\n')
     : '';
   return {
     text,

@@ -203,6 +203,13 @@ export type StreamEvent =
   | { type: "tool_use_start"; id: string; name: string }
   | { type: "tool_use_delta"; id: string; input: string }
   | { type: "tool_use_end"; id: string }
+  /** Tool lifecycle owned by an external agent runtime (an ACP CLI), not by
+   *  this runner's tool loop. `tool_call` opens the visible row when the CLI
+   *  starts a tool; `tool_result` closes it with the CLI's own output.
+   *  These never produce `tool_use` content blocks, so the runner's loop
+   *  control flow is unaffected. */
+  | { type: "tool_call"; id: string; name: string; input?: unknown }
+  | { type: "tool_result"; id: string; name?: string; output?: string; isError?: boolean }
   | { type: "message_start"; usage?: Partial<Usage> }
   | {
       type: "message_end";

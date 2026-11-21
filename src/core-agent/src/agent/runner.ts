@@ -2119,6 +2119,22 @@ export class AgentRunner {
               };
             }
             streamingTool = null;
+          } else if (ev.type === "tool_call") {
+            // An external runtime (ACP CLI) executed this call inside its own
+            // loop. Forward the lifecycle as a UI receipt only: no tool_use
+            // block is committed, so this runner still ends the turn normally.
+            streamingTool = null;
+            if (ev.id && ev.name) yield { type: "tool_start", id: ev.id, name: ev.name, input: ev.input };
+          } else if (ev.type === "tool_result") {
+            if (ev.id) {
+              yield {
+                type: "tool_end",
+                id: ev.id,
+                name: ev.name || "",
+                result: ev.output || "",
+                ...(ev.isError ? { isError: true } : {}),
+              };
+            }
           } else if (ev.type === "retry") {
             visibleRetryAttempt += 1;
             yield { type: "retry", attempt: visibleRetryAttempt, reason: ev.reason };

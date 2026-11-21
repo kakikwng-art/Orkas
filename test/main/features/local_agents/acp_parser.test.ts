@@ -109,11 +109,28 @@ describe('local_agents/backends/_acp › handleAcpMessage', () => {
       name: 'image_generate', callId: 'image-1', input: { prompt: 'a fox' },
     });
     expect(h.onToolResult).toHaveBeenCalledWith({
-      name: 'tool', callId: 'image-1', output: '{"ok":true}',
+      name: 'tool', callId: 'image-1', output: '{"ok":true}', status: 'completed',
     });
     expect(h.onMediaOutput).toHaveBeenCalledWith({
       callId: 'image-1',
       items: [{ data: 'AAAA', uri: 'file:///tmp/image.png', mediaType: 'image/png' }],
+    });
+  });
+
+  it('prefers the readable transcript over byte-array raw output', () => {
+    const h = makeHandlers();
+    handleAcpMessage({
+      method: 'session/update',
+      params: { update: {
+        sessionUpdate: 'tool_call_update',
+        toolCallId: 'b-1',
+        status: 'completed',
+        content: [{ type: 'content', content: { type: 'text', text: 'fallback text' } }],
+        rawOutput: { type: 'Bash', output: [13, 10, 68, 111, 110, 101], output_for_prompt: 'readable transcript' },
+      } },
+    }, h);
+    expect(h.onToolResult).toHaveBeenCalledWith({
+      name: 'tool', callId: 'b-1', output: 'readable transcript', status: 'completed',
     });
   });
 

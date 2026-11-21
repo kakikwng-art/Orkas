@@ -234,10 +234,15 @@ export function makeAcpBackend(def: AcpBackendDef): LocalBackend {
             || !values.some((option: any) => option?.value === selection.value))) {
             applyNextSelection(id); return;
           }
-          if (!config || typeof config.id !== 'string' || !config.id
-            || config.type !== 'select' || !values.some((option: any) => option?.value === selection.value)) {
+          if (!config || typeof config.id !== 'string' || !config.id || config.type !== 'select') {
             failSelection(selection.category); return;
           }
+          // The advertised list may be provisional: Grok 1.0.77 serves a
+          // fallback catalog from session/new while its auth-backed model list
+          // is still being fetched, so a valid id can be briefly absent. The
+          // CLI stays the authority — ask it to switch and require the
+          // acknowledgment below rather than failing early or running the
+          // default model.
           if (config.currentValue === selection.value) { applyNextSelection(id); return; }
           pendingSelection = { configId: config.id, value: selection.value };
           if (selection.category === 'model') needsMcpRefresh = true;
@@ -399,13 +404,28 @@ export function makeAcpBackend(def: AcpBackendDef): LocalBackend {
             onThinking: text => opts.onEvent({ type: 'thinking', text }),
             onToolUse: tool => {
               if (tool.callId) toolNames.set(tool.callId, tool.name);
-              opts.onEvent({ type: 'tool-event', tool: tool.name, callId: tool.callId, phase: 'use', input: tool.input });
+              opts.onEvent({
+                type: 'tool-event',
+                tool: tool.name,
+                callId: tool.callId,
+                phase: 'use',
+                input: tool.input,
+                ...(tool.status ? { status: tool.status } : {}),
+              });
             },
             onToolResult: tool => {
               const name = tool.name === 'tool' && tool.callId
                 ? toolNames.get(tool.callId) || tool.name
                 : tool.name;
-              opts.onEvent({ type: 'tool-event', tool: name, callId: tool.callId, phase: 'result', output: tool.output });
+              opts.onEvent({
+                type: 'tool-event',
+                tool: name,
+                callId: tool.callId,
+                phase: 'result',
+                output: tool.output,
+                ...(tool.status ? { status: tool.status } : {}),
+                ...(tool.isError ? { isError: true } : {}),
+              });
               if (tool.callId) toolNames.delete(tool.callId);
             },
             onMediaOutput: media => opts.onEvent({
@@ -569,8 +589,17 @@ interface AcpHandlers {
   onSessionNew(sessionId: string): void;
   onTextDelta(text: string): void;
   onThinking(text: string): void;
-  onToolUse(tool: { name: string; callId: string; input: unknown }): void;
-  onToolResult(tool: { name: string; callId: string; output: string }): void;
+  onToolUse(tool: { name: string; callId: string; input: unknown; status?: string }): void;
+  onToolResult(tool: {
+    name: string;
+    callId: string;
+    output: string;
+    /** ACP lifecycle status (`pending` / `in_progress` / `completed` /
+     *  `failed` / `cancelled`) when the server reports one. Omitted for
+     *  servers that never send it. */
+    status?: string;
+    isError?: boolean;
+  }): void;
   onMediaOutput(media: { callId: string; items: Array<Record<string, string>> }): void;
   onUsageUpdate(update: unknown): void;
   /** Provider-reported usage on the prompt terminal (`result._meta`). */
@@ -624,21 +653,38 @@ export function handleAcpMessage(env: any, h: AcpHandlers): void {
       const tool = upd.tool && typeof upd.tool === 'object' ? upd.tool : {};
       const callId = String(upd.toolCallId || tool.id || tool.callId || '');
       const name = String(upd.title || tool.name || upd.kind || 'tool');
+      const status = acpToolStatus(upd);
       h.onToolUse({
         name,
         callId,
         input: upd.rawInput ?? tool.input ?? {},
+        ...(status ? { status } : {}),
       });
       emitAcpMedia(upd, callId, h);
+      // Some servers report an instantaneous tool only once, already
+      // terminal. Without this receipt the row would stay "running" until
+      // the turn ended.
+      if (status === 'completed' || status === 'failed') {
+        h.onToolResult({
+          name,
+          callId,
+          output: acpToolOutput(upd, tool),
+          status,
+          ...(status === 'failed' ? { isError: true } : {}),
+        });
+      }
       return;
     }
     if (kind === 'tool_call_update') {
       const tool = upd.tool && typeof upd.tool === 'object' ? upd.tool : {};
       const callId = String(upd.toolCallId || tool.id || tool.callId || '');
+      const status = acpToolStatus(upd);
       h.onToolResult({
         name: String(upd.title || tool.name || 'tool'),
         callId,
         output: acpToolOutput(upd, tool),
+        ...(status ? { status } : {}),
+        ...(status === 'failed' || status === 'cancelled' ? { isError: true } : {}),
       });
       emitAcpMedia(upd, callId, h);
       return;
@@ -678,10 +724,27 @@ export function handleAcpMessage(env: any, h: AcpHandlers): void {
   }
 }
 
+function acpToolStatus(upd: any): string {
+  return typeof upd?.status === 'string' ? upd.status.trim().toLowerCase() : '';
+}
+
 function acpToolOutput(upd: any, tool: any): string {
   const raw = upd.rawOutput ?? tool.output;
   if (typeof raw === 'string') return raw;
-  if (raw !== undefined) return JSON.stringify(raw);
+  if (raw && typeof raw === 'object') {
+    // Grok's Bash rawOutput keeps the readable transcript next to its numeric
+    // stdout bytes, so never let the byte array win over the text.
+    for (const key of ['output_for_prompt', 'stdout', 'stderr']) {
+      const value = raw[key];
+      if (typeof value === 'string' && value.trim()) return value;
+    }
+  }
+  const text = acpContentText(upd);
+  if (text) return text;
+  return raw !== undefined ? JSON.stringify(raw) : '';
+}
+
+function acpContentText(upd: any): string {
   if (!Array.isArray(upd.content)) return '';
   return upd.content.flatMap((item: any): string[] => {
     const content = item?.type === 'content' ? item.content : item;
