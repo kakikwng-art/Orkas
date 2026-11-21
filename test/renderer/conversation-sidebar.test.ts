@@ -146,6 +146,9 @@ function loadConversationRenderer() {
       'chat.conv_pin_title': 'Pin',
       'chat.conv_unpin_title': 'Unpin',
       'chat.conv_rename_title': 'Rename',
+      'chat.conv_export_json': 'Export JSON',
+      'chat.conv_export_done': 'Conversation exported.',
+      'chat.conv_export_failed': 'Failed to export the conversation.',
       'chat.conv_del_title': 'Delete',
       'project.menu.more_actions': 'More actions',
       'project.todo.status_blocked': 'Blocked',
@@ -2113,11 +2116,32 @@ describe('conversation sidebar task row actions', () => {
     ];
 
     expect(context._conversationActionItems('c1').map((it: any) => it.label))
-      .toEqual(['Pin', 'Rename', 'Delete']);
+      .toEqual(['Pin', 'Rename', 'Export JSON', 'Delete']);
     expect(context._conversationActionItems('c2').map((it: any) => it.label))
-      .toEqual(['Unpin', 'Rename', 'Delete']);
+      .toEqual(['Unpin', 'Rename', 'Export JSON', 'Delete']);
     expect(context._conversationActionItems('c1', { hidePin: true }).map((it: any) => it.label))
-      .toEqual(['Rename', 'Delete']);
+      .toEqual(['Rename', 'Export JSON', 'Delete']);
+  });
+
+  it('exports the selected conversation through its project-aware menu action', async () => {
+    const context = loadConversationRenderer();
+    const requests: Array<{ url: string; options: any }> = [];
+    const toasts: any[] = [];
+    context.conversations = [{ conversation_id: 'c1', title: 'Filed', project_id: 'p1' }];
+    context.apiFetch = async (url: string, options: any) => {
+      requests.push({ url, options });
+      return { ok: true, json: async () => ({ ok: true, exported: true }) };
+    };
+    context.uiToast = (...args: any[]) => toasts.push(args);
+
+    const item = context._conversationActionItems('c1').find((entry: any) => entry.action === 'export-json');
+    await item.onClick();
+
+    expect(requests).toEqual([{
+      url: '/api/conversations/c1/export-json?project_id=p1',
+      options: { method: 'POST' },
+    }]);
+    expect(toasts).toEqual([['Conversation exported.', { variant: 'success' }]]);
   });
 
   it('offers to file a task under a project only while it has none', () => {
@@ -2135,11 +2159,11 @@ describe('conversation sidebar task row actions', () => {
     ];
 
     expect(context._conversationActionItems('c1').map((it: any) => it.action))
-      .toEqual(['pin', 'rename', 'to-project', 'delete']);
+      .toEqual(['pin', 'rename', 'export-json', 'to-project', 'delete']);
     // Filing can happen without a click, so a filed task offers the way back
     // rather than nothing. The two entries are mutually exclusive.
     expect(context._conversationActionItems('c2').map((it: any) => it.action))
-      .toEqual(['pin', 'rename', 'out-of-project', 'delete']);
+      .toEqual(['pin', 'rename', 'export-json', 'out-of-project', 'delete']);
     // Delete stays last, and stays the only destructive entry.
     const loose = context._conversationActionItems('c1');
     expect(loose[loose.length - 1].danger).toBe(true);

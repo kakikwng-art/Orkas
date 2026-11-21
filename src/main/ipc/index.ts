@@ -45,6 +45,11 @@ import * as kbIndexer from '../features/kb_indexer';
 import * as chatAttachments from '../features/chat_attachments';
 import * as chatArtifacts from '../features/chat_artifacts';
 import * as conversationOutputs from '../features/conversation_outputs';
+import {
+  buildConversationExport,
+  conversationExportFilename,
+  writeConversationExport,
+} from '../features/conversation_export';
 import * as savedApps from '../features/saved_apps';
 import * as previewWindows from '../features/preview_windows';
 import { webAppInvokeHandlers, webAppCall } from './web_apps';
@@ -1340,6 +1345,27 @@ const invokeHandlers: Record<string, InvokeHandler> = {
       ctx.userId, cid, title, conversationProjectHint(args));
     if (!conv) throw new Error('conversation not found');
     return { conversation: conv };
+  },
+
+  'conversations.exportJson': async (args, ctx) => {
+    const { cid } = args;
+    if (!safeId(cid)) throw new Error('invalid cid');
+    const conv = await chats.getConversationMetadata(ctx.userId, cid, conversationProjectHint(args));
+    if (!conv) throw new Error('conversation not found');
+    const result = await dialog.showSaveDialog({
+      defaultPath: conversationExportFilename(conv.title, cid),
+      filters: [{ name: 'JSON', extensions: ['json'] }],
+    });
+    if (result.canceled || !result.filePath) return { canceled: true };
+    if (users.getActiveUserId() !== ctx.userId) throw new Error('active user changed');
+    const bundle = await buildConversationExport(
+      ctx.userId,
+      cid,
+      conv.project_id ?? null,
+      conv as unknown as Record<string, unknown>,
+    );
+    await writeConversationExport(result.filePath, bundle);
+    return { exported: true };
   },
 
   'conversations.move': async (args, ctx) => {

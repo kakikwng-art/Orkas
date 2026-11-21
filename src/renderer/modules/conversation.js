@@ -6580,6 +6580,11 @@ function _conversationActionItems(cid, opts = {}) {
     label: t('chat.conv_rename_title'),
     onClick: () => opts.renameInHeader ? _startConversationHeaderRename(cid) : _renameConversation(cid, opts),
   });
+  items.push({
+    action: 'export-json',
+    label: t('chat.conv_export_json'),
+    onClick: () => _exportConversationJson(cid),
+  });
   // Filing a task under a project relocates it on disk, so it is offered only
   // where it means something: a conversation that is not in one already.
   if (conv && !conv.project_id) {
@@ -6609,6 +6614,29 @@ function _conversationActionItems(cid, opts = {}) {
     onClick: () => _deleteConversationWithConfirm(cid, opts),
   });
   return items;
+}
+
+async function _exportConversationJson(cid) {
+  const projectId = _projectIdForConversation(cid);
+  try {
+    const response = await apiFetch(
+      `/api/conversations/${encodeURIComponent(cid)}/export-json?project_id=${encodeURIComponent(projectId)}`,
+      { method: 'POST' },
+    );
+    let result = null;
+    try { result = await response.json(); } catch (_) { /* status remains authoritative */ }
+    if (!response.ok || result?.ok === false) throw new Error(result?.error || 'export failed');
+    if (result?.canceled) return false;
+    if (typeof uiToast === 'function') uiToast(t('chat.conv_export_done'), { variant: 'success' });
+    return true;
+  } catch (err) {
+    _convLog.warn('conversation export failed', {
+      error_type: err && typeof err.name === 'string' ? err.name : 'unknown',
+    });
+    if (typeof uiToast === 'function') uiToast(t('chat.conv_export_failed'), { variant: 'error' });
+    else await uiAlert(t('chat.conv_export_failed'));
+    return false;
+  }
 }
 
 function _openConversationActionMenu(anchorBtn, cid, opts = {}) {
