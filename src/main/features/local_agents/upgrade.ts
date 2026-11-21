@@ -23,6 +23,7 @@ const log = createLogger('local-cli-upgrade');
 const PACKAGES: Record<LocalCliType, readonly string[]> = {
   codex: ['@openai/codex'], claude: ['@anthropic-ai/claude-code'],
   opencode: ['opencode-ai', '@opencode/cli'], openclaw: ['openclaw'], hermes: [],
+  grok: ['@xai-official/grok'],
 };
 export type CliUpgradePlan = { method: 'native' | 'npm' | 'brew' | 'unavailable'; command?: string; args?: string[] };
 export type CliUpgradeInfo = { type: LocalCliType; version: string | null; can_upgrade: boolean; method: CliUpgradePlan['method'] };
@@ -114,7 +115,7 @@ export async function planCliUpgrade(type: LocalCliType, binPath: string): Promi
   const cellar = segments.indexOf('Cellar'); const cask = segments.indexOf('Caskroom');
   const owner = cellar >= 0 ? cellar : cask;
   const brewNames: Record<LocalCliType, readonly string[]> = {
-    codex: ['codex'], claude: ['claude-code'], opencode: ['opencode'], openclaw: ['openclaw'], hermes: [],
+    codex: ['codex'], claude: ['claude-code'], opencode: ['opencode'], openclaw: ['openclaw'], hermes: [], grok: [],
   };
   if (owner >= 0 && brewNames[type].includes(segments[owner + 1])) {
     const brew = path.join(segments.slice(0, owner).join(path.sep), 'bin', 'brew');

@@ -31,6 +31,12 @@
       description_en: 'Carries out research, code development, and tasks that require multiple steps, providing research findings, code changes, or generated files.',
       isCoding: false,
     },
+    grok: {
+      name: 'Grok',
+      description_zh: '使用 Grok Build 理解和维护项目代码，开发功能、修复缺陷、审查改动并完成多步骤工程任务。',
+      description_en: 'Uses Grok Build to understand and maintain project code, develop features, fix bugs, review changes, and complete multi-step engineering tasks.',
+      isCoding: true,
+    },
   };
   if (typeof module !== 'undefined' && module.exports) module.exports = defaults;
   if (typeof window !== 'undefined') window.LOCAL_CLI_DEFAULTS = defaults;

@@ -59,6 +59,7 @@ export interface CatalogEntry {
   docsUrl?: string;           // where to create an API key (shown in the add-key form)
   region?: 'cn';              // 'cn' marks providers whose primary endpoint is in China
   oauthOnly?: boolean;        // if true, hide the API-key path entirely
+  localCli?: 'grok';          // official local CLI login; never asks for an API key
   managedByOrkas?: boolean;   // if true, Orkas Server brokers the model; no user API key is needed
   customOpenAICompatible?: boolean; // user supplies base URL + model metadata
   /** Per-provider prerequisite note shown on the card + the add-key form.
@@ -97,6 +98,8 @@ export const CATALOG: readonly CatalogEntry[] = [
   { id: 'deepseek',     label: 'DeepSeek',      docsUrl: 'https://platform.deepseek.com/api_keys' },
 
   { id: 'openai-codex', label: 'OpenAI Codex',  oauthOnly: true },
+  { id: 'grok-build',   label: 'Grok', localCli: 'grok',
+    subscriptionNote: 'provider.grok_build.note_subscription' },
   { id: 'openai',       label: 'OpenAI',        docsUrl: 'https://platform.openai.com/api-keys' },
   { id: 'google',       label: 'Google Gemini', docsUrl: 'https://aistudio.google.com/app/apikey' },
   { id: 'anthropic',    label: 'Anthropic',     docsUrl: 'https://console.anthropic.com/settings/keys' },
@@ -145,6 +148,12 @@ export const CATALOG: readonly CatalogEntry[] = [
 export const CURATED_MODELS: Readonly<Record<string, readonly ProviderModelEntry[]>> = {
   ...DEFAULT_PROVIDER_MODELS,
   [ORKAS_API_PROVIDER]: ORKAS_API_LLM_MODELS,
+  'grok-build': [
+    { id: 'grok-4.7', name: 'Grok 4.7', contextWindow: 131_072, maxTokens: 16_384, supportsVision: false },
+    { id: 'grok-4.7-build-fast', name: 'Grok 4.7 Build Fast', contextWindow: 131_072, maxTokens: 16_384, supportsVision: false },
+    { id: 'grok-4.6', name: 'Grok 4.6', contextWindow: 131_072, maxTokens: 16_384, supportsVision: false },
+    { id: 'grok-4.5', name: 'Grok 4.5', contextWindow: 131_072, maxTokens: 16_384, supportsVision: false },
+  ],
 };
 
 export function curatedModelsFor(providerId: string): ProviderModelEntry[] {
@@ -745,6 +754,10 @@ export function providerManagedByOrkas(id: string): boolean {
   return CATALOG.find((p) => p.id === id)?.managedByOrkas === true;
 }
 
+export function providerLocalCli(id: string): CatalogEntry['localCli'] {
+  return CATALOG.find((p) => p.id === id)?.localCli;
+}
+
 export function providerUsesCustomOpenAIConfig(id: string): boolean {
   return CATALOG.find((p) => p.id === id)?.customOpenAICompatible === true;
 }
@@ -769,7 +782,7 @@ export interface CustomOpenAICompatibleRuntimeConfig {
  * provider registry. `listProviders()` treats these as API-key-capable
  * even though `listPiProviders()` doesn't list them.
  */
-export const EXTERNAL_API_PROVIDERS: readonly string[] = [ORKAS_API_PROVIDER, 'moonshot', 'deepseek', 'doubao', 'custom'];
+export const EXTERNAL_API_PROVIDERS: readonly string[] = [ORKAS_API_PROVIDER, 'moonshot', 'deepseek', 'doubao', 'grok-build', 'custom'];
 
 // ── Image-generation capability map ─────────────────────────────────────
 //

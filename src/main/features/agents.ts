@@ -271,7 +271,7 @@ export interface Agent {
    *  means the agent runs through `core-agent` like every existing
    *  agent. `kind === 'cli'` routes the worker turn through
    *  `features/local_agents/runner.ts` to spawn a local coding CLI
-   *  (claude code / codex / openclaw / opencode / hermes). The field is
+   *  (claude code / codex / grok / openclaw / opencode / hermes). The field is
    *  set at create time from the modal's runtime selector and edited
    *  via the dedicated `chat_agent_setup_cli.md` prompt; the LLM
    *  doesn't author it directly. */

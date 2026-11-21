@@ -1128,6 +1128,22 @@ it('does not undo the first completed OAuth entry when a duplicate completion wo
 
 
 describe('legacy context capacity remediation', () => {
+  it('renders Grok local CLI credentials as authorized login without a key mask', () => {
+    const { context } = loadSettingsClickHarness();
+    const row = context._settingsRenderEntryRow({
+      entryId: 'grok-local', provider: 'grok-build', providerLabel: 'Grok',
+      model: 'grok-4.7', modelName: 'Grok 4.7', modelEditable: true,
+      profileId: 'grok-build:default', profileLabel: 'default',
+      profileType: 'local_cli', profileAvailable: true,
+      profileMasked: undefined, availability: 'available', modelAvailable: true,
+    }, 0);
+    const main = row.children.find((child: FakeElement) => child.className === 'entry-main');
+    const meta = main?.children.find((child: FakeElement) => child.className === 'entry-meta');
+    expect(meta?.children[0]?.className).toBe('account-type-badge oauth');
+    expect(meta?.children[0]?.textContent).toBe('settings.entries.oauth_badge');
+    expect(meta?.children.some((child: FakeElement) => child.className === 'account-mask')).toBe(false);
+  });
+
   it('keeps a too-small saved model visible and removable without ranking or reordering it', () => {
     const { context } = loadSettingsClickHarness();
     const row = context._settingsRenderEntryRow({

@@ -312,7 +312,7 @@ describe('public agent creation and resource workflows', () => {
     expect(requests[0].name).toBe('ClaudeCode');
   });
 
-  it.each(['claude', 'codex', 'openclaw', 'opencode', 'hermes'].flatMap(cli => (
+  it.each(['claude', 'codex', 'openclaw', 'opencode', 'hermes', 'grok'].flatMap(cli => (
     ['en', 'zh', 'ja', 'pt'].map(lang => ({ cli, lang }))
   )))('fills and saves the real $cli default in a $lang UI after an empty description', async ({ cli, lang }) => {
     const { context, element } = loadAgentRenderer();

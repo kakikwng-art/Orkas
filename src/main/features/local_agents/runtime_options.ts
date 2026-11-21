@@ -450,6 +450,20 @@ export function parseHermesDefaultModel(raw: string): string | null {
   return null;
 }
 
+export function parseGrokModels(raw: string): Pick<LocalCliRuntimeOptions, 'models' | 'default_model'> {
+  const clean = stripAnsi(String(raw || ''));
+  const defaultModel = safeToken(/^\s*Default model:\s*(.+?)\s*$/im.exec(clean)?.[1]);
+  const models = uniqueModels(clean.split(/\r?\n/).flatMap(line => {
+    const match = /^\s*[*-]\s+([^\s(]+)(?:\s+\(default\))?\s*$/.exec(line);
+    const id = safeToken(match?.[1]);
+    return id ? [{ id, label: id, is_default: id === defaultModel }] : [];
+  }));
+  if (defaultModel && !models.some(model => model.id === defaultModel)) {
+    models.unshift({ id: defaultModel, label: defaultModel, is_default: true });
+  }
+  return { models, default_model: defaultModel || null };
+}
+
 /** Ask Claude Code for the models it can run, over the stream-json control
  * protocol. Builds without that control request exit or stay silent, which the
  * caller reads as "keep the documented aliases". */
@@ -688,6 +702,18 @@ async function discover(entry: LocalCliEntry, cwd: string, force: boolean, custo
     out.can_select_thinking = supportedFlags(help).includes('--variant');
     out.allow_custom_model = out.can_select_model;
     out.allow_custom_thinking = out.can_select_thinking;
+    return out;
+  }
+  if (entry.type === 'grok') {
+    // `grok models` is a local, non-inference query. It returns the cached
+    // catalog even before login and never spends subscription usage.
+    const catalog = await captureCli(entry, ['models'], cwd);
+    Object.assign(out, parseGrokModels(catalog.stdout + catalog.stderr));
+    out.status = catalog.ok ? 'ready' : 'partial';
+    // Inherit Grok Build's own default until its ACP model-selection metadata
+    // is covered by a real-CLI compatibility canary.
+    out.can_select_model = false;
+    out.allow_custom_model = false;
     return out;
   }
   const status = await captureCli(entry, ['status'], cwd);

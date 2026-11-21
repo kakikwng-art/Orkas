@@ -1333,7 +1333,8 @@ async function _settingsRenderPicker() {
     const baseLabel = _settingsProviderDisplayName(p);
     const label = p.recommended ? `${baseLabel} ${t('settings.picker.recommended_suffix')}` : baseLabel;
     let authHint = '';
-    if (p.supportsOAuth && p.supportsApiKey)       authHint = t('settings.oauth.support_api_and_oauth');
+    if (p.localCli)                                authHint = t('settings.oauth.support_local_cli');
+    else if (p.supportsOAuth && p.supportsApiKey)  authHint = t('settings.oauth.support_api_and_oauth');
     else if (p.supportsOAuth && !p.supportsApiKey) authHint = t('settings.oauth.support_oauth_only');
     else if (p.supportsApiKey)                     authHint = t('settings.oauth.support_api_only');
     // subscriptionNote is the "wrong-account → 401 wastes the key"
@@ -1443,6 +1444,10 @@ async function _settingsClickAddEntry() {
 // ── Method chooser + credential forms ──
 
 function _settingsChooseAccountMethod(provider, modelId) {
+  if (provider.localCli) {
+    void _settingsAddLocalCliEntry(provider, modelId);
+    return;
+  }
   if (_settingsIsOpenRouterCustomModel(provider.id, modelId)) {
     _settingsShowApiKeyForm(provider, modelId);
     return;
@@ -1496,6 +1501,28 @@ function _settingsChooseAccountMethod(provider, modelId) {
 
   if (hasOAuth && !hasApi) { _settingsStartOAuthFlow(provider, modelId); return; }
   _settingsShowApiKeyForm(provider, modelId);
+}
+
+async function _settingsAddLocalCliEntry(provider, modelId) {
+  _settingsSetStatus('settings-picker-status', 'busy', t('settings.save_loading'));
+  try {
+    const res = await window.orkas.invoke('auth.addLocalCliEntry', {
+      provider: provider.id,
+      model: modelId,
+    });
+    if (!res || !res.ok) throw new Error((res && res.error) || t('settings.save_failed'));
+    _settingsCloseAddModal();
+    await _settingsReload();
+    if (typeof refreshModelGuard === 'function') {
+      await Promise.resolve(refreshModelGuard()).catch(() => {});
+    }
+  } catch (err) {
+    _settingsSetStatus(
+      'settings-picker-status',
+      'error',
+      (err && err.message) || t('settings.save_failed'),
+    );
+  }
 }
 
 function _settingsShowApiKeyForm(provider, modelId) {
@@ -2266,7 +2293,7 @@ function _settingsRenderEntryRow(entry, priorityIdx) {
   if (isOrkasApi) {
     badge.className = 'account-type-badge';
     badge.textContent = 'Orkas';
-  } else if (entry.profileType === 'oauth') {
+  } else if (entry.profileType === 'oauth' || entry.profileType === 'local_cli') {
     badge.className = 'account-type-badge oauth' + (entry.oauthExpired ? ' expired' : '');
     badge.textContent = entry.oauthExpired ? t('settings.entries.oauth_expired') : t('settings.entries.oauth_badge');
   } else {

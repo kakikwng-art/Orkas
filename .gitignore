@@ -7,6 +7,7 @@
 /resources/runtime/.uv-*
 /resources/runtime/.node-*
 /resources/runtime/node
+/resources/runtime/grok-cli/node_modules/
 /resources/runtime/python
 /resources/runtime/uv
 /resources/runtime/ffmpeg

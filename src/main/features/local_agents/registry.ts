@@ -150,6 +150,20 @@ export const LOCAL_CLI_CAPABILITIES = {
     progressEvents: true,
     permissionPolicies: ['inherit', 'ask', 'full_access'],
   },
+  grok: {
+    // Grok Build exposes ACP over `grok agent stdio`. Keep turns fresh until
+    // its session/resume contract is covered by a real-CLI lifecycle canary;
+    // Orkas supplies bounded recovery context between turns in the meantime.
+    resume: 'none',
+    instructionChannel: 'user-message',
+    durableInstructionScope: 'invocation',
+    codingProjectDirectory: true,
+    orkasBridge: true,
+    agentMemory: false,
+    activeRunIngress: 'none',
+    progressEvents: true,
+    permissionPolicies: ['inherit', 'ask', 'full_access'],
+  },
 } as const satisfies Record<string, LocalCliCapabilities>;
 
 export type LocalCliType = keyof typeof LOCAL_CLI_CAPABILITIES;
@@ -219,6 +233,7 @@ const BIN_NAMES: Record<LocalCliType, string> = {
   openclaw: 'openclaw',
   opencode: 'opencode',
   hermes: 'hermes',
+  grok: 'grok',
 };
 
 /** Env var to override default binary path per CLI. */
@@ -228,6 +243,7 @@ const ENV_KEYS: Record<LocalCliType, string> = {
   openclaw: 'ORKAS_OPENCLAW_PATH',
   opencode: 'ORKAS_OPENCODE_PATH',
   hermes: 'ORKAS_HERMES_PATH',
+  grok: 'ORKAS_GROK_PATH',
 };
 
 /** Documented version probes for each CLI, in compatibility order. */
@@ -239,6 +255,7 @@ const VERSION_PROBES: Record<LocalCliType, readonly (readonly string[])[]> = {
   // Hermes documents both forms across releases. Prefer the stable
   // subcommand, then tolerate installations that expose only the flag.
   hermes: [['version'], ['--version']],
+  grok: [['version'], ['--version']],
 };
 
 // Version commands are normally quick, but bundled CLIs can take several
@@ -255,6 +272,11 @@ export function localCliSearchDirs(
 ): string[] {
   const dirs: string[] = [];
   const pathApi = platform === 'win32' ? path.win32 : path.posix;
+  // The source build may keep the official Grok npm package beside its other
+  // pinned runtimes so no user-global npm prefix is required.
+  if (type === 'grok') {
+    dirs.push(pathApi.resolve(__dirname, '../../../..', 'resources', 'runtime', 'grok-cli', 'node_modules', '.bin'));
+  }
   // The official installer adds this to shell profiles, which GUI apps do not load.
   if (type === 'opencode' && home) dirs.push(pathApi.join(home, '.opencode', 'bin'));
   if (platform === 'win32') {

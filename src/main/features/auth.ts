@@ -85,6 +85,7 @@ import {
   providerDocsUrl,
   providerSubscriptionNote,
   providerRecommended,
+  providerLocalCli,
   providerUsesCustomOpenAIConfig,
   sortProviderIds,
   type CustomOpenAICompatibleRuntimeConfig,
@@ -98,6 +99,7 @@ import type { KeyFailureKind } from '../model/core-agent/auth-error';
 import { createLogger } from '../logger';
 import { t } from '../i18n';
 import { logErrorSummary } from '../util/log-redact';
+import { validateGrokBuildLogin } from '../model/core-agent/grok-build-provider';
 import { sanitizeLogTextForUpload } from '../util/log-sanitize';
 import {
   ORKAS_API_BASE_URL,
@@ -1200,6 +1202,7 @@ export interface ProviderEntry {
   featured: boolean;
   supportsApiKey: boolean;
   supportsOAuth: boolean;
+  localCli?: 'grok';
   customOpenAICompatible?: boolean;
   /** If OAuth on this provider actually logs in via a different pi-ai
    *  provider (e.g. `openai` → `openai-codex`), this carries the target id
@@ -1226,7 +1229,11 @@ function profileToView(id: string, p: StoredProfile): ProfileView {
     createdAt: p.createdAt,
     lastUsed: p.lastUsed,
   };
-  if (p.type === 'api_key') return { ...base, type: 'api_key', masked: maskKey(p.key) };
+  if (p.type === 'api_key') return {
+    ...base,
+    type: 'api_key',
+    ...(providerLocalCli(p.provider) ? {} : { masked: maskKey(p.key) }),
+  };
   return { ...base, type: 'oauth', expired: Date.now() >= p.expires };
 }
 
@@ -1314,7 +1321,8 @@ export async function listProviders(): Promise<{ providers: ProviderEntry[] }> {
     const directOAuth = oauthIds.has(id);
     const aliasOAuth  = OAUTH_ALIAS_FOR[id];
     const supportsOAuth = directOAuth || (!!aliasOAuth && oauthIds.has(aliasOAuth));
-    const supportsApiKey = (apiCapable.has(id) || isExternalApiProvider(id)) && !oauthOnlyIds.has(id);
+    const localCli = providerLocalCli(id);
+    const supportsApiKey = !localCli && (apiCapable.has(id) || isExternalApiProvider(id)) && !oauthOnlyIds.has(id);
     return {
       id,
       label: providerLabel(id),
@@ -1322,6 +1330,7 @@ export async function listProviders(): Promise<{ providers: ProviderEntry[] }> {
       featured: featuredIds.has(id),
       supportsApiKey,
       supportsOAuth,
+      ...(localCli ? { localCli } : {}),
       customOpenAICompatible: providerUsesCustomOpenAIConfig(id),
       oauthProvider: directOAuth ? id : (supportsOAuth ? aliasOAuth : undefined),
       docsUrl: providerDocsUrl(id),
@@ -1455,6 +1464,21 @@ export async function addApiKeyEntry(
   clearCooldown(profileId);
   invalidateCoreAgentRunner();
   return { profileId, entryId };
+}
+
+export async function addLocalCliEntry(
+  providerId: string,
+  modelId: string,
+  label?: string,
+): Promise<{ profileId: string; entryId: string }> {
+  const provider = String(providerId || '').trim();
+  if (provider !== 'grok-build' || providerLocalCli(provider) !== 'grok') {
+    throw new Error('unsupported local CLI model provider');
+  }
+  if (!(await validateGrokBuildLogin())) {
+    throw new Error(t('provider.grok_build.login_required'));
+  }
+  return addApiKeyEntry(provider, modelId, 'local-cli:grok', label);
 }
 
 export interface AddCustomModelEntryInput {
@@ -1621,7 +1645,7 @@ export interface EntryView {
   profileId: string;
   profileAvailable: boolean;
   profileLabel: string;
-  profileType: 'api_key' | 'oauth';
+  profileType: 'api_key' | 'oauth' | 'local_cli';
   profileMasked?: string;
   oauthExpired?: boolean;
   createdAt: number;
@@ -1661,11 +1685,15 @@ function entryToView(
     profileLabel: e.provider === ORKAS_API_PROVIDER
       ? 'Orkas'
       : (prof?.label || e.profileId.split(':').slice(1).join(':') || '(missing)'),
-    profileType: (prof?.type as 'api_key' | 'oauth') || 'api_key',
+    profileType: providerLocalCli(e.provider)
+      ? 'local_cli' as const
+      : ((prof?.type as 'api_key' | 'oauth') || 'api_key'),
     createdAt: e.createdAt,
     lastUsed: e.lastUsed,
   };
-  if (prof?.type === 'api_key') return { ...base, profileMasked: maskKey(prof.key) };
+  if (prof?.type === 'api_key') return providerLocalCli(e.provider)
+    ? base
+    : { ...base, profileMasked: maskKey(prof.key) };
   if (prof?.type === 'oauth')  return { ...base, oauthExpired: Date.now() >= prof.expires };
   return base;
 }
@@ -2622,6 +2650,14 @@ export async function testConnection(
   if (!apiKey) return { ok: false, error: 'no credential stored for this provider', profileId: chosenProfileId };
   if (providerUsesCustomOpenAIConfig(pid) && !customConfig) {
     return { ok: false, error: 'custom model configuration is incomplete', profileId: chosenProfileId };
+  }
+
+  if (pid === 'grok-build') {
+    const t0 = Date.now();
+    const ok = await validateGrokBuildLogin();
+    return ok
+      ? { ok: true, durationMs: Date.now() - t0, model: selectedModel, profileId: chosenProfileId }
+      : { ok: false, durationMs: Date.now() - t0, error: t('provider.grok_build.login_required'), profileId: chosenProfileId };
   }
 
   // Orkas-side external providers bypass pi-ai's catalog — route directly

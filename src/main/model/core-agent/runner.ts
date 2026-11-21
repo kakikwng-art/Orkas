@@ -123,6 +123,7 @@ import {
   createCustomOpenAICompatibleProvider,
   omitReservedOutputLimitForProvider,
 } from './external-providers';
+import { buildGrokBuildModel, createGrokBuildProvider } from './grok-build-provider';
 import { withTaskBudget } from './task-budget-provider';
 import { createRotatingProvider, type RotatingCandidate } from './rotating-provider';
 import { clearCooldown } from './profile-cooldown';
@@ -180,6 +181,8 @@ function buildExternalProviderModel(
       return buildDeepSeekModel(modelId);
     case 'doubao':
       return buildDoubaoModel(modelId);
+    case 'grok-build':
+      return buildGrokBuildModel(modelId);
     case 'custom':
       return customConfig
         ? (customConfig.protocol === 'anthropic'
@@ -1779,6 +1782,8 @@ async function buildExternalProvider(
       return await createDeepSeekProvider({ apiKey, modelId });
     case 'doubao':
       return await createDoubaoProvider({ apiKey, modelId });
+    case 'grok-build':
+      return createGrokBuildProvider(modelId);
     case 'custom':
       if (!choice.customConfig) throw new Error('custom model configuration is incomplete');
       return await createCustomOpenAICompatibleProvider({

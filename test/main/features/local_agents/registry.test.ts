@@ -91,6 +91,17 @@ describe('local CLI context capabilities', () => {
         progressEvents: true,
         permissionPolicies: ['inherit', 'ask', 'full_access'],
       },
+      grok: {
+        resume: 'none',
+        instructionChannel: 'user-message',
+        durableInstructionScope: 'invocation',
+        codingProjectDirectory: true,
+        orkasBridge: true,
+        agentMemory: false,
+        activeRunIngress: 'none',
+        progressEvents: true,
+        permissionPolicies: ['inherit', 'ask', 'full_access'],
+      },
     });
   });
 
@@ -116,6 +127,7 @@ describe('local CLI context capabilities', () => {
     expect(localCliSupportsAgentMemory('openclaw')).toBe(false);
     expect(localCliSupportsAgentMemory('opencode')).toBe(false);
     expect(localCliSupportsAgentMemory('hermes')).toBe(false);
+    expect(localCliSupportsAgentMemory('grok')).toBe(false);
     expect(localCliSupportsAgentMemory('unknown')).toBe(false);
   });
 });
@@ -329,6 +341,7 @@ describe('local_agents/registry', () => {
     'ORKAS_OPENCLAW_PATH',
     'ORKAS_OPENCODE_PATH',
     'ORKAS_HERMES_PATH',
+    'ORKAS_GROK_PATH',
     'APPDATA',
     'LOCALAPPDATA',
     'VOLTA_HOME',
@@ -356,6 +369,9 @@ describe('local_agents/registry', () => {
     }
     process.env.APPDATA = path.join(process.env.HOME, 'AppData', 'Roaming');
     process.env.LOCALAPPDATA = path.join(process.env.HOME, 'AppData', 'Local');
+    // The checkout may contain the app-local Grok runtime. Keep registry tests
+    // isolated from real installed CLIs unless a case opts in explicitly.
+    process.env.ORKAS_GROK_PATH = path.join(tmpDir, 'missing-grok');
     invalidateCache();
   });
 
@@ -421,6 +437,7 @@ describe('local_agents/registry', () => {
     const probeLog = path.join(tmpDir, 'unexpected-presence-process.log');
     const installed = LOCAL_CLI_TYPES.map(type => writeCountingMockCli(path.join(dirs[29], type), probeLog, '999.0.0'));
     process.env.PATH = dirs.join(path.delimiter);
+    delete process.env.ORKAS_GROK_PATH;
     const samples: number[] = [];
     for (let round = 0; round < 10; round += 1) {
       const start = performance.now();
@@ -689,7 +706,7 @@ describe('local_agents/registry', () => {
 
   it('coalesces concurrent forced discovery into one set of version processes', async () => {
     const probeLog = path.join(tmpDir, 'probe-calls.log');
-    // The scheduling fixture represents all five CLIs, including OpenClaw's
+    // The scheduling fixture represents every registered CLI, including OpenClaw's
     // calendar-version floor; the availability oracle must use a valid version.
     const fake = writeCountingMockCli(path.join(tmpDir, 'counting-cli'), probeLog, '2026.4.11');
     process.env.PATH = '';
@@ -698,6 +715,7 @@ describe('local_agents/registry', () => {
     process.env.ORKAS_OPENCLAW_PATH = fake;
     process.env.ORKAS_OPENCODE_PATH = fake;
     process.env.ORKAS_HERMES_PATH = fake;
+    process.env.ORKAS_GROK_PATH = fake;
 
     const [first, second] = await Promise.all([
       detectAll({ force: true }),
@@ -707,13 +725,16 @@ describe('local_agents/registry', () => {
     expect(second).toBe(first);
     expect(first.filter(e => !e.available).map(e => ({ type: e.type, error: e.error, path: e.path }))).toEqual([]);
     const probes = fs.readFileSync(probeLog, 'utf8').trim().split(/\r?\n/).sort();
-    // Four single-probe CLIs plus Hermes `version` and `--version`.
+    // Four flag-only CLIs plus concurrent `version` / `--version` probes for
+    // Hermes and Grok. Preferred results return first, but both probes launch.
     expect(probes).toEqual([
       '--version',
       '--version',
       '--version',
       '--version',
       '--version',
+      '--version',
+      'version',
       'version',
     ]);
   });

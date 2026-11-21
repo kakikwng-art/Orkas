@@ -3221,6 +3221,9 @@ const invokeHandlers: Record<string, InvokeHandler> = {
   'auth.addApiKeyEntry': async ({ provider, model, apiKey, label }) => (
     auth.addApiKeyEntry(provider, model, apiKey, label)
   ),
+  'auth.addLocalCliEntry': async ({ provider, model, label }) => (
+    auth.addLocalCliEntry(provider, model, label)
+  ),
   'auth.addCustomModelEntry': async (
     { label, protocol, baseUrl, model, apiKey, contextWindow, maxTokens, supportsVision },
   ) => auth.addCustomModelEntry({

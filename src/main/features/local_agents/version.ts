@@ -33,6 +33,8 @@ export const MIN_VERSIONS: Readonly<Record<LocalCliType, string>> = {
   // ACP protocolVersion=1 and sessionUpdate envelopes observed with Hermes
   // 0.9 are the baseline used by _acp.ts, not a claim about earlier releases.
   hermes: '0.9.0',
+  // Grok Build introduced the documented `agent stdio` ACP surface in 0.1.
+  grok: '0.1.0',
 };
 
 /** Anthropic's upstream CHANGELOG.md, 2.1.81: --bare was introduced for

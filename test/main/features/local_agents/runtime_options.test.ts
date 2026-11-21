@@ -11,6 +11,7 @@ import {
   mapOpenclawModels,
   parseBannerJson,
   parseHermesDefaultModel,
+  parseGrokModels,
   parseOpenCodeModels,
   getLocalCliRuntimeOptions,
   getLocalCliSupportedFlags,
@@ -275,6 +276,22 @@ describe('local_agents/runtime_options discovery parsing', () => {
     expect(parseHermesDefaultModel('Model status: openai/gpt-5.4')).toBeNull();
     expect(parseHermesDefaultModel('Model: bad\u0000value')).toBeNull();
   });
+
+  it('parses the Grok Build model catalog and marks its default', () => {
+    expect(parseGrokModels([
+      'Default model: grok-4.6',
+      '',
+      'Available models:',
+      '  * grok-4.6 (default)',
+      '  - grok-4.5',
+    ].join('\n'))).toEqual({
+      default_model: 'grok-4.6',
+      models: [
+        { id: 'grok-4.6', label: 'grok-4.6', is_default: true },
+        { id: 'grok-4.5', label: 'grok-4.5' },
+      ],
+    });
+  });
 });
 
 describe('local_agents/runtime_options process boundary', () => {
@@ -442,7 +459,7 @@ require('node:readline').createInterface({ input: process.stdin }).on('line', li
       expect(kill).not.toHaveBeenCalled();
     } finally { kill.mockRestore(); }
   });
-  it.each(['claude', 'codex', 'hermes', 'opencode', 'openclaw'] as const)(
+  it.each(['claude', 'codex', 'hermes', 'opencode', 'openclaw', 'grok'] as const)(
     'publishes the adapter-supported $cli permission levels even when discovery is unavailable',
     async (cli) => {
     const result = await getLocalCliRuntimeOptions({

@@ -43,6 +43,7 @@ describe('provider_catalog › CATALOG', () => {
       'orkas-api',
       'deepseek',
       'openai-codex',
+      'grok-build',
       'openai',
       'google',
       'anthropic',
@@ -60,6 +61,14 @@ describe('provider_catalog › CATALOG', () => {
 
   it('has VISIBLE_PROVIDERS derived from CATALOG order', () => {
     expect([...VISIBLE_PROVIDERS]).toEqual(CATALOG.map((p) => p.id));
+  });
+
+  it('offers Grok Build through the official local CLI login surface', () => {
+    expect(CATALOG.find((p) => p.id === 'grok-build')).toMatchObject({
+      label: 'Grok',
+      localCli: 'grok',
+    });
+    expect(CURATED_MODELS['grok-build']?.map((model) => model.id)).toContain('grok-4.7');
   });
 
   it('excludes oauthOnly entries from FEATURED_API_PROVIDERS (API-key docs list)', () => {
@@ -1086,6 +1095,7 @@ describe('provider_catalog › EXTERNAL_API_PROVIDERS', () => {
       'moonshot',
       'deepseek',
       'doubao',
+      'grok-build',
       'custom',
     ]);
   });
