@@ -18,29 +18,18 @@
 
 个人功能迁移、验证记录及尚未迁入的事项见 [`修改日志.md`](./修改日志.md)。不要把原工作区的未提交状态、历史问题清单或其他 Agent 的私有上下文当成本仓库当前事实。
 
-## 2. 中央规范采用记录
+## 2. 中央规范入口
 
-| 项目 | 采用值 |
-| --- | --- |
-| 中央仓库 | `app-development-standards` |
-| GitHub | <https://github.com/kakikwng-art/app-development-standards> |
-| 采用集合版本 | **1.2.0** |
-| 采用 Commit | **`4b3ea7463d5fe24e541a923509c124dd42f3a6d4`** |
-| 默认分支 | `main` |
-| 本机 Windows 副本 | `D:\Codex\_Global\app-development-standards` |
-| 中央入口 | 中央仓库根目录的 `AGENTS.md` |
-| 固定版本入口 | [中央 AGENTS.md（采用 Commit）](https://github.com/kakikwng-art/app-development-standards/blob/4b3ea7463d5fe24e541a923509c124dd42f3a6d4/AGENTS.md) |
+中央开发规范按动态引用读取，默认跟随中央 `main` 的最新提交。本入口不锁定集合版本或 Commit。
 
-接入核查时，中央本地 HEAD、`origin/main` 与 GitHub `main` 均为上述 Commit。本项目采用该固定版本，不因中央仓库后来出现新提交而自动升级。
+- GitHub：`https://github.com/kakikwng-art/app-development-standards`
+- 默认分支：`main`
+- 中央入口：`AGENTS.md`
+- 内部路径：从中央仓库根目录按相对路径读取。先读 `AGENTS.md`，再按其链接读取需要的文件，例如 `rules/development-workflow.md`。不使用指向历史 Commit 的永久链接。
+- 本地路径：`D:\Codex\_Global\app-development-standards`。仅在能够访问该目录时使用。macOS 或其他不能访问该 Windows 路径的环境，使用自己的中央仓库克隆，或直接读取上述 GitHub `main`。
+- 访问失败：明确报告未能读取的位置和原因，停止依赖未读取规则的步骤。不得假装已经读取或遵守，不得把旧版本冒充最新版本。
 
-### 跨设备读取与访问失败
-
-1. Windows 优先读取上述本机副本，并核对版本和 Commit。
-2. macOS 或其他设备使用自己的中央仓库克隆；Windows 绝对路径不是唯一有效入口。
-3. 也可通过 GitHub 按上述 Commit 读取。中央文件引用均使用中央仓库内的相对路径，例如 `rules/development-workflow.md`。
-4. 不在本项目中复制整套中央规范作为长期维护副本。
-5. 本地副本不可访问时，尝试有权限的 GitHub 来源；仍不可用时，停止依赖这些规则的工作并报告，不能假装已经读取。
-6. 本地中央版本与上述采用记录不一致时，先核对差异并报告；未经任务授权，不擅自修改本项目的采用版本。
+每次新任务重新解析中央 `main` 的最新提交。同一任务只从开始时确定的那一个完整 Commit 读取，避免中途换规则；这不是长期锁定。不要求把该 Commit、所读文档或读取日期写入项目日志。不在本项目中复制整套中央规范。项目专属规范继续有效；冲突时暂停并询问用户。
 
 ## 3. Agent 开工顺序
 
@@ -75,7 +64,7 @@ git rev-list --left-right --count HEAD...@{upstream}
 | 新任务说明 | 需要时使用 `templates/task-instruction.md` |
 | 凭据、隐私、日志或敏感数据 | `rules/information-security.md` |
 | 项目接入或中央版本升级 | `integration/project-adoption.md` |
-| UI 设计、实现、修改或审查 | [`skills/generic-ui-standards/SKILL.md`](https://github.com/kakikwng-art/app-development-standards/blob/4b3ea7463d5fe24e541a923509c124dd42f3a6d4/skills/generic-ui-standards/SKILL.md)，并读取本仓库与目标功能相关的既有 UI Skill |
+| UI 设计、实现、修改或审查 | 中央仓库相对路径 `skills/generic-ui-standards/SKILL.md`，并读取本仓库与目标功能相关的既有 UI Skill |
 
 项目技术约束用于解释 Orkas 的具体实现，但不得削弱中央安全、授权和协作规则。发现冲突或证据不足时暂停并报告，不自行选择更宽松的解释。
 
